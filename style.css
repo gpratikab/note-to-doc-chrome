@@ -1,4 +1,11 @@
 /* style.css */
+/* These styles are now scoped inside a Shadow DOM. */
+/* No IDs or `all: initial` resets are needed. */
+
+:host {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  font-size: 16px;
+}
 
 .qn-container {
   position: fixed;
@@ -8,15 +15,14 @@
   height: 400px;
   min-width: 300px;
   min-height: 250px;
-  background-color: rgba(25, 25, 28, 0.25);
+  background-color: rgba(25, 25, 28, 0.85);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 12px;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
-  z-index: 99999;
+  z-index: 2147483647;
   color: #f0f0f0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -27,8 +33,6 @@
   cursor: move;
   background-color: rgba(0, 0, 0, 0.2);
   border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-  border-top-left-radius: 12px;
-  border-top-right-radius: 12px;
   font-weight: 600;
   display: flex;
   justify-content: space-between;
@@ -45,6 +49,8 @@
   font-weight: bold;
   opacity: 0.7;
   transition: opacity 0.2s;
+  padding: 0;
+  line-height: 1;
 }
 
 .qn-close-btn:hover {
@@ -68,8 +74,9 @@
   border-radius: 6px;
   color: #f0f0f0;
   font-size: 14px;
-  box-sizing: border-box;
   flex-shrink: 0;
+  font-family: inherit;
+  box-sizing: border-box;
 }
 
 .qn-input::placeholder {
@@ -96,6 +103,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
+  box-sizing: border-box;
 }
 
 .qn-toolbar-btn:hover {
@@ -123,6 +131,7 @@
 
 .qn-editor ul, .qn-editor ol {
   padding-left: 25px;
+  margin: 8px 0;
 }
 .qn-editor li {
   margin-bottom: 4px;
@@ -132,17 +141,17 @@
   padding: 8px 15px;
   background-color: rgba(0, 0, 0, 0.2);
   border-top: 1px solid rgba(255, 255, 255, 0.1);
-  border-bottom-left-radius: 12px;
-  border-bottom-right-radius: 12px;
   font-size: 12px;
   display: flex;
   justify-content: space-between;
   align-items: center;
   flex-shrink: 0;
-  /* MODIFIED: Add position relative to act as a container for the handle */
   position: relative;
 }
 
+.qn-status { 
+    color: #a0a0a0;
+}
 .qn-status-idle { color: #a0a0a0; }
 .qn-status-saving { color: #4a90e2; }
 .qn-status-saved { color: #3cce83; }
@@ -158,13 +167,13 @@
   font-size: 12px;
   font-weight: 500;
   transition: background-color 0.2s;
+  font-family: inherit;
 }
 
 .qn-save-close-btn:hover {
   background-color: #357abd;
 }
 
-/* Style for the new resize handle */
 .qn-resize-handle {
   position: absolute;
   bottom: 0;
@@ -175,4 +184,5 @@
   z-index: 10;
   background: linear-gradient(135deg, transparent 0%, transparent 60%, rgba(255,255,255,0.2) 60%, rgba(255,255,255,0.2) 80%, transparent 80%, transparent 100%);
 }
+```
 

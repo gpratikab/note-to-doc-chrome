@@ -1,23 +1,23 @@
 {
   "manifest_version": 3,
   "name": "Quick Notes to Google Docs",
-  "version": "1.1",
-  "description": "A floating notepad to quickly save notes to a designated Google Doc.",
+  "version": "1.5",
+  "description": "A floating notepad that persists across tabs to save notes to a designated Google Doc.",
   "permissions": [
     "storage",
-    "activeTab",
-    "scripting",
     "identity",
     "alarms",
     "notifications",
-    "offscreen"
+    "offscreen",
+    "scripting"
   ],
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAv/UmjZO6WMSVON2+do4d4Y7qlzUHHtLy0BBOO4UZVmF8SCxszjjSlAFzLwIaeRr/TdBhGHkS/peTBxqpKynFcStwoWa4KfKXrtx7YNAc/PBnghqBg/TjtNXm/YjPSW898vpggPfv5fQg1MyMF7JDZrtJHlYt3RBA+ZlFI0bZ1MWALYvgjkwW1MfqANDMuxMZxp2nN4Wbigbxostj+Na2omOZFKuvtJ2FBciiQYmNE7ZWtqhlW4zR0wVfkLiMaFolhfx6YPG3e8tXjJXqxW8C/e25X0TAO1hB1WyESXlp8eKjpTRrC3ldQa9xN6eEn9qwexjLOw4z83nddXKTxQM7iwIDAQAB",
   "host_permissions": [
+    "<all_urls>",
     "https://docs.googleapis.com/"
   ],
   "action": {
-    "default_title": "Open Quick Note"
+    "default_title": "Toggle Quick Note"
   },
   "background": {
     "service_worker": "background.js"
@@ -29,11 +29,18 @@
     ]
   },
   "options_page": "options.html",
-  "web_accessible_resources": [{
-    "resources": ["style.css"],
-    "matches": ["<all_urls>"]
-  }],
   "icons": {
     "128": "icon128.png"
-  }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "style.css"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ]
 }
+
