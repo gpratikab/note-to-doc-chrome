@@ -1,10 +1,10 @@
 // content.js
 
 (() => {
-  // Ensure script runs only once
+  // Ensure script runs only once, but allow it to be shown again if hidden
   if (document.getElementById('quick-note-container')) {
     const container = document.getElementById('quick-note-container');
-    container.style.display = container.style.display === 'none' ? 'block' : 'none';
+    container.style.display = 'flex';
     return;
   }
 
@@ -21,12 +21,6 @@
   const closeButton = document.createElement('button');
   closeButton.innerHTML = '&times;';
   closeButton.className = 'qn-close-btn';
-  closeButton.onclick = () => {
-    const title = document.getElementById('qn-title-input').value;
-    const content = document.getElementById('qn-editor').innerHTML;
-    chrome.runtime.sendMessage({ action: "saveAndClose", data: { title, content } });
-    container.remove();
-  };
 
   const mainContainer = document.createElement('div');
   mainContainer.id = 'qn-main-container';
@@ -52,10 +46,19 @@
   editor.contentEditable = 'true';
   editor.setAttribute('data-placeholder', 'Start writing your note...');
 
+  const footer = document.createElement('div');
+  footer.className = 'qn-footer';
+  const statusSpan = document.createElement('span');
+  statusSpan.id = 'qn-status';
+  statusSpan.className = 'qn-status-idle';
+  statusSpan.textContent = 'Ready';
+  footer.appendChild(statusSpan);
+
+
   // --- Assemble the UI ---
   header.appendChild(closeButton);
   mainContainer.append(titleInput, toolbar, editor);
-  container.append(header, mainContainer);
+  container.append(header, mainContainer, footer);
   document.body.appendChild(container);
 
   // --- Add CSS ---
@@ -63,13 +66,29 @@
   styleLink.rel = 'stylesheet';
   styleLink.href = chrome.runtime.getURL('style.css');
   document.head.appendChild(styleLink);
-
+  
   // --- UI Logic ---
   
-  // Make the container draggable
+  // Load cached note from background script on open
+  chrome.runtime.sendMessage({ action: "getInitialCache" }, (response) => {
+    if (chrome.runtime.lastError) {
+        console.log("Could not get initial cache. It may be empty.");
+    } else if (response) {
+      titleInput.value = response.title || '';
+      editor.innerHTML = response.content || '';
+    }
+  });
+
+  closeButton.onclick = () => {
+    const title = titleInput.value;
+    const content = editor.innerHTML;
+    // Hide the container immediately for a faster user experience
+    container.style.display = 'none'; 
+    chrome.runtime.sendMessage({ action: "saveAndClose", data: { title, content } });
+  };
+
   makeDraggable(container, header);
 
-  // Formatting buttons
   toolbar.addEventListener('click', (e) => {
     const command = e.target.closest('.qn-toolbar-btn')?.dataset.command;
     if (command) {
@@ -78,7 +97,7 @@
     }
   });
 
-  // Debounced message sending to background script
+  // Debounced message sending to background script for caching
   let debounceTimer;
   const sendNoteToBackground = () => {
     clearTimeout(debounceTimer);
@@ -86,11 +105,53 @@
       const title = titleInput.value;
       const content = editor.innerHTML;
       chrome.runtime.sendMessage({ action: "cacheNote", data: { title, content } });
-    }, 500); // Send update 500ms after user stops typing
+      updateStatus('idle', 'Unsaved changes');
+    }, 500);
   };
 
   titleInput.addEventListener('input', sendNoteToBackground);
   editor.addEventListener('input', sendNoteToBackground);
+  
+  // --- Status Update Listener ---
+  chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    // This listener is only responsible for status updates.
+    if (request.action === "updateStatus") {
+      try {
+        updateStatus(request.status, request.message);
+        sendResponse({ received: true });
+      } catch (e) {
+        console.error("Failed to update status UI:", e);
+      }
+      // Return true to indicate that we are sending a response (best practice for async handling).
+      return true;
+    }
+    // IMPORTANT: Do not return true for other message types, as this listener does not handle them.
+    // This allows the message channel to close properly for unhandled actions.
+  });
+
+  function updateStatus(status, message = '') {
+      // Defensive check to ensure the element exists before trying to modify it.
+      if (!statusSpan) {
+          console.error("Could not find status element to update.");
+          return;
+      }
+      statusSpan.className = `qn-status-${status}`;
+      switch (status) {
+          case 'idle':
+              statusSpan.textContent = message || 'Ready';
+              break;
+          case 'saving':
+              statusSpan.textContent = 'Saving...';
+              break;
+          case 'saved':
+              statusSpan.textContent = `Saved at ${new Date().toLocaleTimeString()}`;
+              break;
+          case 'error':
+              statusSpan.textContent = `Error!`; // Keep it brief
+              statusSpan.title = message; // Show full error on hover
+              break;
+      }
+  }
   
   // --- Helper Functions ---
   function makeDraggable(element, dragHandle) {
@@ -120,6 +181,5 @@
       document.onmousemove = null;
     }
   }
-
 })();
 

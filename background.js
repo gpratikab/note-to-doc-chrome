@@ -1,29 +1,48 @@
 // background.js
 
+// --- Utility Functions ---
+const getStorageData = (key) => new Promise((resolve) => chrome.storage.sync.get(key, resolve));
+
+async function getDocId() {
+  const { docId } = await getStorageData('docId');
+  if (docId) {
+    return docId;
+  }
+  // If no ID is set, open the options page for the user to set it.
+  console.log("Google Doc ID not found. Opening options page.");
+  chrome.runtime.openOptionsPage();
+  return null;
+}
+
 // --- Global State ---
 let authToken = null;
 let noteCache = { title: '', content: '' };
 
+
 // --- Extension Lifecycle ---
+
+// On install, check if Doc ID is set. If not, open options.
+chrome.runtime.onInstalled.addListener((details) => {
+    if (details.reason === 'install') {
+        getDocId(); // This will open the options page if the ID isn't set
+    }
+});
+
 
 // Listener for the extension icon click
 chrome.action.onClicked.addListener(async (tab) => {
   try {
-    // Attempt to inject the content script into the active tab
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       files: ['content.js']
     });
   } catch (e) {
-    // If injection fails, it's likely a protected page.
     console.error(`Quick Notes: Failed to inject script. Error: ${e.message}`);
-    
-    // Create a user-friendly notification to explain the issue.
     chrome.notifications.create({
       type: 'basic',
-      iconUrl: 'icon128.png', // You'll need to add an icon to your extension folder
+      iconUrl: 'icon128.png',
       title: 'Quick Notes Blocked',
-      message: 'This page is protected by browser policy. The Quick Notes extension cannot run here.',
+      message: 'This page is protected by browser policy and the Quick Notes extension cannot run here.',
       priority: 2
     });
   }
@@ -33,39 +52,32 @@ chrome.action.onClicked.addListener(async (tab) => {
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "cacheNote") {
     noteCache = request.data;
-  }
-  if (request.action === "saveAndClose") {
+  } else if (request.action === "saveAndClose") {
     noteCache = request.data;
-    saveNoteToDoc(true); // Force save on close
+    saveNoteToDoc(true, sender.tab.id); // Force save on close
+  } else if (request.action === "getInitialCache") {
+    sendResponse(noteCache);
   }
-  // This return true is important for async sendResponse
-  return true;
+  return true; // Important for async sendResponse
 });
+
 
 // --- Alarms for Autosave ---
-
-// Create an alarm to save the note every minute
-chrome.alarms.create('auto-save-note', {
-  delayInMinutes: 1,
-  periodInMinutes: 1
-});
-
-// Listener for the alarm
+chrome.alarms.create('auto-save-note', { delayInMinutes: 1, periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'auto-save-note') {
-    saveNoteToDoc(false);
+    // We pass null for the tabId because an alarm doesn't have a specific tab
+    saveNoteToDoc(false, null);
   }
 });
 
 
 // --- Google Docs API Integration ---
-
-// Function to get OAuth2 token
 function getAuthToken(interactive) {
   return new Promise((resolve, reject) => {
     chrome.identity.getAuthToken({ interactive }, (token) => {
       if (chrome.runtime.lastError) {
-        reject(chrome.runtime.lastError);
+        reject(new Error(chrome.runtime.lastError.message));
       } else {
         authToken = token;
         resolve(token);
@@ -74,45 +86,61 @@ function getAuthToken(interactive) {
   });
 }
 
+// --- Messaging to Content Script ---
+async function sendStatusUpdate(tabId, status, message = '') {
+  try {
+    let targetTabId = tabId;
+    // If the save was triggered by an alarm, we need to find an active tab with the notepad open.
+    if (!targetTabId) {
+      const [activeTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      if (activeTab) {
+        targetTabId = activeTab.id;
+      }
+    }
+    // Only send if we have a valid tab
+    if (targetTabId) {
+      // A simple check to see if the content script is likely to be there before sending.
+      chrome.tabs.sendMessage(targetTabId, { action: "updateStatus", status, message }, (response) => {
+          if (chrome.runtime.lastError) {
+              console.log("Could not send status to content script, it might be closed.");
+          }
+      });
+    }
+  } catch (error) {
+    console.log("Error trying to send status update:", error);
+  }
+}
+
 // Main function to save the note
-async function saveNoteToDoc(isFinalSave) {
-  if ((!noteCache.content || noteCache.content.trim() === '') && (!noteCache.title || noteCache.title.trim() === '')) {
-    if (isFinalSave) console.log("Note is empty, nothing to save.");
+async function saveNoteToDoc(isFinalSave, tabId) {
+  // Don't autosave an empty note. Only check this for autosaves.
+  if (!isFinalSave && (!noteCache.content || noteCache.content.trim() === '') && (!noteCache.title || noteCache.title.trim() === '')) {
     return;
   }
+  
+  await sendStatusUpdate(tabId, "saving");
 
   try {
-    // Try to get token silently first. If it fails, try interactively.
-    let token = await getAuthToken(false).catch(async () => {
-      console.log("Silent auth failed, trying interactive auth.");
-      return await getAuthToken(true);
-    });
-
-    if (!token) {
-      console.error("Could not obtain authentication token. The user may have denied the request.");
-      return;
+    const docId = await getDocId();
+    if (!docId) {
+      throw new Error("Google Doc ID is not configured. Please set it in the extension options.");
     }
     
-    // --- IMPORTANT ---
-    // The Google Doc ID is now hardcoded. Replace the placeholder below.
-    // Get the ID from your Google Doc's URL. For a URL like:
-    // https://docs.google.com/document/d/1a2b3c4d_LONG_ID_HERE_5e6f/edit
-    // The ID is "1a2b3c4d_LONG_ID_HERE_5e6f"
-    const docId = "1QrcHJj661dqQdysr4Y4W-Qa6ltI-ikysg9X_ol4VZ34";
-
-    if (docId === "YOUR_DOCUMENT_ID_HERE") {
-      console.error("ACTION REQUIRED: Please hardcode your Google Doc ID in background.js before using the extension.");
-      // We will stop here to prevent errors.
-      return;
-    }
+    // This will prompt the user to log in if necessary.
+    const token = await getAuthToken(false).catch(() => getAuthToken(true));
 
     const timestamp = new Date().toLocaleString();
     const titleText = noteCache.title.trim() === '' ? 'Untitled Note' : noteCache.title;
-
-    // This regular expression strips HTML tags from the content string.
     const plainTextContent = noteCache.content.replace(/<[^>]*>?/gm, '');
+
+    // Also don't save if the note is completely empty on a final save.
+    if (plainTextContent.trim() === '' && titleText === 'Untitled Note') {
+        if(isFinalSave) console.log("Note is empty, nothing to save.");
+        await sendStatusUpdate(tabId, "idle"); // Reset status to idle
+        return;
+    }
     
-    const textToInsert = `\n\n--- ${timestamp} ---\nTitle: ${titleText}\n\n${plainTextContent}\n---`;
+    const textToInsert = `\n\n--- ${titleText} | ${timestamp} ---\n\n${plainTextContent}\n`;
 
     // First, get the document to find its end index
     const getResponse = await fetch(`https://docs.googleapis.com/v1/documents/${docId}?fields=body.content`, {
@@ -120,67 +148,40 @@ async function saveNoteToDoc(isFinalSave) {
     });
 
     if (!getResponse.ok) {
-      // --- IMPROVED ERROR LOGGING ---
-      // Try to get a more detailed error message from the API response body.
-      let errorDetails = `Status: ${getResponse.status}, Status Text: "${getResponse.statusText}"`;
-      try {
-        const errorData = await getResponse.json();
-        errorDetails += `, Response: ${JSON.stringify(errorData)}`;
-      } catch (e) {
-        // If the response isn't JSON, capture it as text.
-        errorDetails += `, Body: "${await getResponse.text()}"`;
+      const errorData = await getResponse.json();
+      let message = errorData.error?.message || `Status: ${getResponse.status}`;
+      if (getResponse.status === 404) {
+          message = "Document not found. Check the ID in the options.";
       }
-      throw new Error(`Failed to get document. Details: ${errorDetails}`);
+      throw new Error(message);
     }
 
     const docData = await getResponse.json();
-    let insertionIndex = 1; // Default for an empty doc
-
-    // Safely find the end of the document to append text
-    if (docData.body && docData.body.content) {
-      const lastElement = docData.body.content[docData.body.content.length - 1];
-      if (lastElement.endIndex > 1) {
-        insertionIndex = lastElement.endIndex - 1;
-      }
-    }
+    const lastElement = docData.body?.content?.slice(-1)[0];
+    const insertionIndex = lastElement?.endIndex > 1 ? lastElement.endIndex - 1 : 1;
     
-    const params = {
+    // Update the document
+    const updateResponse = await fetch(`https://docs.googleapis.com/v1/documents/${docId}:batchUpdate`, {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        requests: [{
-          insertText: {
-            location: { index: insertionIndex },
-            text: textToInsert
-          }
-        }]
-      })
-    };
-
-    const updateResponse = await fetch(`https://docs.googleapis.com/v1/documents/${docId}:batchUpdate`, params);
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requests: [{ insertText: { location: { index: insertionIndex }, text: textToInsert } }] })
+    });
 
     if (!updateResponse.ok) {
-      // --- IMPROVED ERROR LOGGING ---
       const errorData = await updateResponse.json();
-      console.error('API Error on update:', errorData); // Keep the console log
-      const errorDetails = `Status: ${updateResponse.status}, Response: ${JSON.stringify(errorData)}`;
-      throw new Error(`Failed to update document. Details: ${errorDetails}`);
+      throw new Error(errorData.error?.message || `Failed to update document.`);
     }
 
     console.log('Note successfully saved to Google Doc.');
-    // Clear cache after successful save
-    noteCache = { title: '', content: '' };
+    noteCache = { title: '', content: '' }; // Clear cache after successful save
+    await sendStatusUpdate(tabId, "saved");
 
   } catch (error) {
-    console.error('Error saving note:', error);
-    if (error.message.includes("token")) {
-      chrome.identity.removeCachedAuthToken({ token: authToken }, () => {
-        authToken = null;
-        console.log("Removed invalid auth token.");
-      });
+    console.error('Error saving note:', error.message);
+    await sendStatusUpdate(tabId, "error", error.message);
+    // If the token is invalid, try to remove it so we can get a fresh one next time.
+    if (error.message.includes("token") || error.message.includes("Authentication")) {
+      chrome.identity.removeCachedAuthToken({ token: authToken }, () => { authToken = null; });
     }
   }
 }
