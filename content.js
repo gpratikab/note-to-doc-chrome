@@ -234,6 +234,15 @@
                 });
             }, 500);
         };
+        
+        // Add a paste event listener to the editor to auto-format links
+        editor.addEventListener('paste', (e) => {
+            // Let the paste happen naturally, then process the result.
+            setTimeout(() => {
+                linkifyNode(editor);
+                debouncedCacheUpdate(); // Trigger a save after linkifying
+            }, 50); 
+        });
 
         titleInput.addEventListener('input', debouncedCacheUpdate);
         editor.addEventListener('input', debouncedCacheUpdate);
@@ -252,6 +261,55 @@
     }
 
     // --- Helper Functions ---
+
+    // New function to find and format URLs within a given node.
+    function linkifyNode(node) {
+        const urlRegex = /https?:\/\/[^\s<>"']+/g;
+        const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+        const nodesToProcess = [];
+
+        // First, find all text nodes that contain a URL and are not already in a link.
+        let textNode;
+        while (textNode = walker.nextNode()) {
+            if (textNode.parentNode.tagName !== 'A' && urlRegex.test(textNode.nodeValue)) {
+                nodesToProcess.push(textNode);
+            }
+        }
+
+        // Process the collected nodes to avoid issues with DOM modification during traversal.
+        nodesToProcess.forEach(textNode => {
+            const fragment = document.createDocumentFragment();
+            let lastIndex = 0;
+
+            textNode.nodeValue.replace(urlRegex, (match, offset) => {
+                // Add the text before the found URL.
+                const textBefore = textNode.nodeValue.substring(lastIndex, offset);
+                if (textBefore) {
+                    fragment.appendChild(document.createTextNode(textBefore));
+                }
+
+                // Create the link element.
+                const link = document.createElement('a');
+                link.href = match;
+                link.textContent = match;
+                fragment.appendChild(link);
+
+                lastIndex = offset + match.length;
+            });
+
+            // Add any remaining text after the last URL.
+            const textAfter = textNode.nodeValue.substring(lastIndex);
+            if (textAfter) {
+                fragment.appendChild(document.createTextNode(textAfter));
+            }
+
+            // Replace the original text node with the new fragment containing links.
+            if (fragment.hasChildNodes()) {
+                textNode.parentNode.replaceChild(fragment, textNode);
+            }
+        });
+    }
+
     function makeDraggable(element, dragHandle, noteId, postIfConnected) {
         dragHandle.onmousedown = (e) => {
             if (e.target.closest('button')) return;

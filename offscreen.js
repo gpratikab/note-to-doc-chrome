@@ -5,7 +5,7 @@ chrome.runtime.onMessage.addListener((request) => {
   if (request.target === 'offscreen' && request.action === 'parseHtml') {
     const result = parseHtmlToGoogleDocs(request.html);
     // Send the result back to the background script
-    chrome.runtime.sendMessage({ action: 'parseComplete', data: result });
+    chrome.runtime.sendMessage({ action: 'parseComplete', data: result, target: 'background' });
   }
 });
 
@@ -24,8 +24,10 @@ function parseHtmlToGoogleDocs(html) {
             plainText += node.textContent;
             const endIndex = plainText.length;
             if (Object.keys(styles).length > 0 && startIndex < endIndex) {
+                // The fields property must be a string of comma-separated paths.
+                const fields = Object.keys(styles).join(',');
                 requests.push({
-                    updateTextStyle: { range: { startIndex, endIndex }, textStyle: styles, fields: Object.keys(styles).join(',') }
+                    updateTextStyle: { range: { startIndex, endIndex }, textStyle: styles, fields: fields }
                 });
             }
         } else if (node.nodeType === 1) { // Element Node
@@ -35,6 +37,19 @@ function parseHtmlToGoogleDocs(html) {
             if (['B', 'STRONG'].includes(tagName)) newStyles.bold = true;
             if (['I', 'EM'].includes(tagName)) newStyles.italic = true;
             if (['U'].includes(tagName)) newStyles.underline = true;
+            
+            // FIX: Add explicit styling for links to be saved in Google Docs.
+            if (tagName === 'A' && node.href) {
+                newStyles.link = { url: node.href };
+                // Set a standard blue link color.
+                newStyles.foregroundColor = {
+                    color: { rgbColor: { red: 0.066, green: 0.337, blue: 0.831 } }
+                };
+                // Ensure links are underlined unless explicitly styled otherwise.
+                if (styles.underline !== false) {
+                    newStyles.underline = true;
+                }
+            }
             
             const isParagraph = ['P', 'H1', 'H2', 'H3', 'LI'].includes(tagName);
 
@@ -68,7 +83,6 @@ function parseHtmlToGoogleDocs(html) {
     
     doc.body.childNodes.forEach(node => walk(node));
     
-    // The final plain text should not end with multiple newlines.
     // Google Docs adds its own spacing.
     return { plainText: plainText.trim(), requests };
 }

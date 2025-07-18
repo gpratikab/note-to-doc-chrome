@@ -80,10 +80,9 @@
 
 /* Styles for the minimized state */
 .qn-container.minimized {
-    /* FIX: Use !important to override the inline 'height' style set by resizing.
-       The header height is ~45px (padding + line-height + border). */
+    /* Use !important to override the inline 'height' style set by resizing. */
     height: 45px !important;
-    min-height: 45px; /* Prevent resizing smaller than the header */
+    min-height: 45px;
 }
 
 .qn-container.minimized .qn-main,
@@ -155,6 +154,12 @@
   flex-grow: 1;
   overflow-y: auto;
   overflow-x: hidden;
+}
+
+/* Add styling for links inside the editor */
+.qn-editor a {
+    color: #8ab4f8;
+    text-decoration: underline;
 }
 
 .qn-editor:empty:before {
