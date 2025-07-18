@@ -4,9 +4,7 @@
 let NOTES = {};
 let AUTH_TOKEN = null;
 let IS_SAVING = false;
-let OFFSCREEN_DOCUMENT_PATH;
 
-// Map to store long-lived connections from content scripts, mapping tabId to port
 const connectedPorts = new Map();
 
 const getStorageData = (key) => new Promise((resolve) => chrome.storage.local.get(key, resolve));
@@ -17,25 +15,29 @@ async function saveState() {
   await setStorageData({ notes: NOTES });
 }
 
-// --- Initialization ---
+// --- Main Execution Flow ---
+// 1. Initialize state from storage.
+// 2. Then set up listeners.
 initializeState().then(setupListeners);
 
+
+// --- Function Definitions ---
+
 async function initializeState() {
-  const { notes } = await getStorageData('notes');
-  if (notes && typeof notes === 'object') {
-    NOTES = notes;
-    console.log('Quick Notes: State restored from storage.', NOTES);
-  } else {
-    console.log('Quick Notes: No state found, starting fresh.');
-  }
+    // FIX: Load existing notes from storage on startup to ensure they persist.
+    const { notes } = await chrome.storage.local.get('notes');
+    if (notes && typeof notes === 'object') {
+        NOTES = notes;
+        console.log('Quick Notes: State restored from storage.', NOTES);
+    } else {
+        console.log('Quick Notes: No state found, starting fresh.');
+        NOTES = {};
+    }
 }
 
 function setupListeners() {
-  // Listen for new connections from content scripts
   chrome.runtime.onConnect.addListener(onConnect);
-  
   chrome.action.onClicked.addListener(onActionClicked);
-  // This onMessage is for simple, one-off messages (like from the offscreen document)
   chrome.runtime.onMessage.addListener(onMessage);
   chrome.alarms.onAlarm.addListener(onAlarm);
   chrome.tabs.onUpdated.addListener(onTabUpdated);
@@ -52,24 +54,23 @@ function onConnect(port) {
     connectedPorts.set(tabId, port);
     console.log(`Tab ${tabId} connected.`);
 
-    // When a tab is closed or navigated away, the port disconnects.
     port.onDisconnect.addListener(() => {
         connectedPorts.delete(tabId);
         console.log(`Tab ${tabId} disconnected.`);
     });
 
-    // Handle messages received from this specific port
     port.onMessage.addListener((request) => {
         handlePortMessage(request, port);
     });
 
-    // When a new connection is made, send it the current state of all notes
-    port.postMessage({ action: 'initialNotes', notes: NOTES });
+    // FIX: When a tab connects, immediately send it the current notes to display.
+    if (Object.keys(NOTES).length > 0) {
+      console.log(`Sending ${Object.keys(NOTES).length} existing notes to tab ${tabId}.`);
+      port.postMessage({ action: 'initialNotes', notes: NOTES });
+    }
 }
 
 // --- Message Handling ---
-
-// Handles messages from long-lived connections
 async function handlePortMessage(request, port) {
     const noteId = request.noteId;
     switch (request.action) {
@@ -79,7 +80,6 @@ async function handlePortMessage(request, port) {
           NOTES[noteId].content = request.data.content;
           NOTES[noteId].isDirty = true;
           await saveState();
-          // Broadcast this update to all other tabs
           broadcastMessage({ action: 'updateNoteContent', noteId: noteId, data: request.data }, port.sender.tab.id);
         }
         break;
@@ -112,11 +112,8 @@ async function handlePortMessage(request, port) {
     }
 }
 
-// Handles one-off messages (mainly for offscreen document)
 function onMessage(request, sender, sendResponse) {
-    // The offscreen document communicates with a simple message, so we keep this listener.
     if (request.target === 'offscreen' || request.action === 'parseComplete') {
-        // This functionality is handled by the listener inside `parseHtmlViaOffscreen`
         return true;
     }
     return true;
@@ -143,7 +140,6 @@ async function onActionClicked(tab) {
   };
   NOTES[noteId] = newNote;
   
-  // Broadcast the creation of the new note to all connected tabs
   broadcastMessage({ action: 'createNote', note: newNote });
   await saveState();
 }
@@ -162,7 +158,9 @@ async function onAlarm(alarm) {
 }
 
 async function onInstalled(details) {
+    // On first install, clear storage and open the options page.
     if (details.reason === 'install') {
+        console.log("Quick Notes: First-time installation. Setting up.");
         await chrome.storage.local.clear();
         chrome.alarms.create('auto-save-all-notes', {
             delayInMinutes: 1,
@@ -170,19 +168,17 @@ async function onInstalled(details) {
         });
         chrome.runtime.openOptionsPage();
     }
-    const tabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*"] });
-    for (const tab of tabs) {
-       await ensureScriptInjected(tab.id);
-    }
 }
 
 function onTabUpdated(tabId, changeInfo, tab) {
+    // When a tab is updated (e.g., reloaded or navigates), ensure the script is there.
     if (changeInfo.status === 'complete' && tab.url && tab.url.startsWith('http')) {
         ensureScriptInjected(tabId);
     }
 }
 
 async function onTabActivated(activeInfo) {
+    // When the user switches to a different tab, ensure the script is there.
     await ensureScriptInjected(activeInfo.tabId);
 }
 
@@ -191,11 +187,11 @@ async function ensureScriptInjected(tabId) {
   try {
     await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
   } catch (e) {
-    // console.warn(`Could not inject script into tab ${tabId}:`, e.message);
+      // Ignore errors, which are common on system pages (e.g. chrome://)
+      // or if the script is already injected.
   }
 }
 
-// Updated to use the persistent ports
 async function broadcastMessage(message, excludeTabId = null) {
   for (const [tabId, port] of connectedPorts.entries()) {
     if (tabId === excludeTabId) continue;
@@ -212,12 +208,11 @@ async function sendStatusUpdate(noteId, status, payload = {}) {
   await broadcastMessage({ action: "updateStatus", noteId, status, payload });
 }
 
-// --- API and Saving Logic (no changes in this function) ---
+// --- API and Saving Logic (no changes) ---
 async function saveNoteToDoc(note, isManualSave) {
   const logPrefix = `[SAVE NOTE]`;
 
   if (IS_SAVING) {
-    console.log(`${logPrefix} Save already in progress. Marking note as dirty to save later.`);
     if (NOTES[note.id]) NOTES[note.id].isDirty = true;
     return;
   }
@@ -226,17 +221,15 @@ async function saveNoteToDoc(note, isManualSave) {
   const noteStateAtSaveStart = { title, content };
 
   if (!title.trim() && !content.replace(/<[^>]*>?/gm, '').trim()) {
-    console.log(`${logPrefix} Note is empty. Aborting save.`);
     return;
   }
 
   IS_SAVING = true;
   await sendStatusUpdate(id, "saving");
-  console.log(`${logPrefix} Starting save for note ID: ${note.id}. NamedRangeId: ${note.namedRangeId}`);
 
   try {
     const { docId } = await getSyncData('docId');
-    if (!docId) throw new Error("Google Doc ID is not configured. Please set it in the extension options.");
+    if (!docId) throw new Error("Google Doc ID is not configured.");
     
     const token = await getAuthToken(isManualSave);
     const requests = [];
@@ -254,8 +247,7 @@ async function saveNoteToDoc(note, isManualSave) {
         if (!docResponse.ok) throw new Error(`Failed to fetch doc data: ${(await docResponse.json()).error.message}`);
         
         const docData = await docResponse.json();
-        const namedRangeInfo = docData.namedRanges?.[note.id];
-        const existingRange = namedRangeInfo?.namedRanges?.[0]?.ranges?.[0];
+        const existingRange = docData.namedRanges?.[note.id]?.namedRanges?.[0]?.ranges?.[0];
         
         if (!existingRange) {
             note.namedRangeId = null; 
@@ -310,8 +302,7 @@ async function saveNoteToDoc(note, isManualSave) {
     if (!updateResponse.ok) throw new Error(`batchUpdate failed: ${(await updateResponse.json()).error.message}`);
 
     const replyData = await updateResponse.json();
-    const createNamedRangeReply = replyData.replies.find(r => r.createNamedRange);
-    const newNamedRangeId = createNamedRangeReply?.createNamedRange?.namedRangeId;
+    const newNamedRangeId = replyData.replies.find(r => r.createNamedRange)?.createNamedRange?.namedRangeId;
 
     if (NOTES[id] && newNamedRangeId) {
       if (NOTES[id].title === noteStateAtSaveStart.title && NOTES[id].content === noteStateAtSaveStart.content) {
@@ -319,13 +310,12 @@ async function saveNoteToDoc(note, isManualSave) {
       }
       NOTES[id].namedRangeId = newNamedRangeId; 
     } else {
-      console.error(`${logPrefix} Failed to update local note state. Note object or newNamedRangeId was missing.`);
+      console.error(`Failed to update note state. Note in memory or newNamedRangeId was missing.`);
     }
     await sendStatusUpdate(id, "saved");
 
   } catch (error) {
-    console.error(`${logPrefix} --- ERROR DURING SAVE ---`);
-    console.error(error);
+    console.error(`--- ERROR DURING SAVE ---`, error);
     await sendStatusUpdate(id, "error", { message: error.message });
     if (error.message.toLowerCase().includes("token")) {
       chrome.identity.removeCachedAuthToken({ token: AUTH_TOKEN }, () => { AUTH_TOKEN = null; });
@@ -368,7 +358,7 @@ async function parseHtmlViaOffscreen(html) {
     await setupOffscreenDocument();
     return new Promise((resolve) => {
         const listener = (message) => {
-            if (message.action === 'parseComplete') {
+            if (message.action === 'parseComplete' && message.target !== 'offscreen') {
                 chrome.runtime.onMessage.removeListener(listener);
                 resolve(message.data);
             }

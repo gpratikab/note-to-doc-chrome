@@ -8,19 +8,22 @@
     window.quickNoteScriptInjected = true;
 
     let port;
+    const allNotes = new Map();
+
+    // REMOVED: The 'killAllNotes' listener is no longer needed with the new background script logic.
 
     function setupConnection() {
         port = chrome.runtime.connect({ name: 'quick-note-port' });
 
-        // Listen for messages from the background script
+        // Listen for messages from the background script via the persistent connection
         port.onMessage.addListener(handleMessage);
 
         // Handle disconnection (e.g., when the extension is reloaded)
         port.onDisconnect.addListener(() => {
-            console.warn("Quick Notes: Connection to background script lost.");
+            console.warn("Quick Notes: Connection to background script lost. Refresh page to restore.");
             // Grey out the UI to indicate it's disconnected
-            document.querySelectorAll('div[id^="note-"]').forEach(host => {
-                const shadow = host.shadowRoot;
+            allNotes.forEach(({ host }) => {
+                 const shadow = host.shadowRoot;
                 if (shadow) {
                     const container = shadow.querySelector('.qn-container');
                     if (container) container.style.opacity = '0.5';
@@ -29,7 +32,7 @@
                         status.textContent = 'Error: Refresh page';
                         status.className = 'qn-status qn-status-error';
                     }
-                     // Disable all buttons
+                    // Disable all buttons
                     shadow.querySelectorAll('button').forEach(btn => btn.disabled = true);
                 }
             });
@@ -40,16 +43,18 @@
     // Establish the initial connection
     setupConnection();
 
-    // --- Global container for all note UIs on this page ---
-    const allNotes = new Map();
 
-    // --- Message Handler ---
+    // --- Message Handler for the persistent port ---
     function handleMessage(request) {
         // If the port is null, it means we are disconnected.
         if (!port) return;
 
         switch (request.action) {
             case "initialNotes":
+                // When a tab is focused or opened, it receives all existing notes.
+                // Clear any old notes first to prevent duplicates.
+                allNotes.forEach(({ host }) => host.remove());
+                allNotes.clear();
                 if (request.notes) {
                     Object.values(request.notes).forEach(createNoteUI);
                 }
@@ -133,8 +138,6 @@
         container.style.top = `${note.top}px`;
         container.style.left = `${note.left}px`;
         container.style.width = `${note.width}px`;
-        // FIX: Always set the container height from the note object.
-        // The '.minimized' class in CSS will use `!important` to override this when needed.
         container.style.height = `${note.height}px`;
 
         const styleLink = document.createElement('link');
