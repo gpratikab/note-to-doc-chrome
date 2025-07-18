@@ -1,129 +1,123 @@
 // content.js
 
 (() => {
-    // This script can be injected multiple times, so we need to ensure we only run the setup once.
-    if (window.quickNoteScriptInjected) {
-        return;
-    }
+    if (window.quickNoteScriptInjected) return;
     window.quickNoteScriptInjected = true;
 
-    let port;
     const allNotes = new Map();
+    
+    // --- Resilient Connection Manager ---
+    let port = null;
+    let isConnecting = false;
+    let messageQueue = [];
 
-    // REMOVED: The 'killAllNotes' listener is no longer needed with the new background script logic.
-
-    function setupConnection() {
-        port = chrome.runtime.connect({ name: 'quick-note-port' });
-
-        // Listen for messages from the background script via the persistent connection
-        port.onMessage.addListener(handleMessage);
-
-        // Handle disconnection (e.g., when the extension is reloaded)
-        port.onDisconnect.addListener(() => {
-            console.warn("Quick Notes: Connection to background script lost. Refresh page to restore.");
-            // Grey out the UI to indicate it's disconnected
-            allNotes.forEach(({ host }) => {
-                 const shadow = host.shadowRoot;
-                if (shadow) {
-                    const container = shadow.querySelector('.qn-container');
-                    if (container) container.style.opacity = '0.5';
-                    const status = shadow.querySelector('.qn-status');
-                    if (status) {
-                        status.textContent = 'Error: Refresh page';
-                        status.className = 'qn-status qn-status-error';
-                    }
-                    // Disable all buttons
-                    shadow.querySelectorAll('button').forEach(btn => btn.disabled = true);
-                }
+    const connect = () => {
+        if (port || isConnecting) return;
+        isConnecting = true;
+        console.log("Quick Notes: Attempting to connect...");
+        
+        try {
+            port = chrome.runtime.connect({ name: 'quick-note-port' });
+            port.onMessage.addListener(handleMessage);
+            port.onDisconnect.addListener(() => {
+                console.warn("Quick Notes: Connection lost. Will attempt to reconnect automatically.");
+                port = null;
+                setTimeout(connect, 1000 + Math.random() * 2000);
             });
-            port = null; // Clear the port
-        });
-    }
+            console.log("Quick Notes: Connection successful.");
+            isConnecting = false;
+            while(messageQueue.length > 0) {
+                port.postMessage(messageQueue.shift());
+            }
+        } catch (e) {
+            console.error("Quick Notes: Connection failed.", e);
+            isConnecting = false;
+            port = null;
+            setTimeout(connect, 5000);
+        }
+    };
+    
+    connect();
 
-    // Establish the initial connection
-    setupConnection();
+    const sendMessage = (message) => {
+        if (port) {
+            try {
+                port.postMessage(message);
+            } catch (e) {
+                port = null;
+                messageQueue.push(message);
+                connect();
+            }
+        } else {
+            messageQueue.push(message);
+            connect();
+        }
+    };
 
-
-    // --- Message Handler for the persistent port ---
+    // --- Message Handler ---
     function handleMessage(request) {
-        // If the port is null, it means we are disconnected.
-        if (!port) return;
+        if (!port && request.action !== 'initialNotes') {
+            connect();
+            return;
+        };
 
-        switch (request.action) {
-            case "initialNotes":
-                // When a tab is focused or opened, it receives all existing notes.
-                // Clear any old notes first to prevent duplicates.
+        const actions = {
+            initialNotes: (req) => {
                 allNotes.forEach(({ host }) => host.remove());
                 allNotes.clear();
-                if (request.notes) {
-                    Object.values(request.notes).forEach(createNoteUI);
+                if (req.notes) Object.values(req.notes).forEach(createNoteUI);
+            },
+            createNote: (req) => createNoteUI(req.note),
+            removeNote: (req) => {
+                const noteUI = allNotes.get(req.noteId);
+                if (noteUI) {
+                    noteUI.host.remove();
+                    allNotes.delete(req.noteId);
                 }
-                break;
-            case "createNote":
-                createNoteUI(request.note);
-                break;
-            case "removeNote":
-                const noteToRemove = allNotes.get(request.noteId);
-                if (noteToRemove) {
-                    noteToRemove.host.remove();
-                    allNotes.delete(request.noteId);
+            },
+            updateNoteMinimizedState: (req) => {
+                allNotes.get(req.noteId)?.container.classList.toggle('minimized', req.isMinimized);
+            },
+            updatePinState: (req) => {
+                 const noteUI = allNotes.get(req.noteId);
+                 if(noteUI) {
+                    noteUI.container.classList.toggle('pinned', req.isPinned);
+                    noteUI.pinButton.classList.toggle('active', req.isPinned);
+                 }
+            },
+            updateNoteColor: (req) => {
+                const noteUI = allNotes.get(req.noteId);
+                if (noteUI) {
+                    noteUI.container.dataset.color = req.color;
                 }
-                break;
-            case "updateNoteMinimizedState":
-                const noteToMinimize = allNotes.get(request.noteId);
-                if (noteToMinimize) {
-                    noteToMinimize.container.classList.toggle('minimized', request.isMinimized);
+            },
+            updateNoteContent: (req) => {
+                const noteUI = allNotes.get(req.noteId);
+                if (noteUI && req.data) {
+                    noteUI.headerTitle.textContent = req.data.title || 'Quick Note';
+                    if (document.activeElement !== noteUI.titleInput) noteUI.titleInput.value = req.data.title;
+                    if (document.activeElement !== noteUI.editor) noteUI.editor.innerHTML = req.data.content;
                 }
-                break;
-            case "updateNoteContent":
-                const noteToUpdateContent = allNotes.get(request.noteId);
-                if (noteToUpdateContent) {
-                    noteToUpdateContent.headerTitle.textContent = request.data.title || 'Quick Note';
-                    if(document.activeElement !== noteToUpdateContent.titleInput) {
-                        noteToUpdateContent.titleInput.value = request.data.title;
-                    }
-                    if(document.activeElement !== noteToUpdateContent.editor) {
-                        noteToUpdateContent.editor.innerHTML = request.data.content;
-                    }
+            },
+            updateStatus: (req) => {
+                const noteUI = allNotes.get(req.noteId);
+                if (noteUI) {
+                    const { statusSpan, saveButton } = noteUI;
+                    statusSpan.className = `qn-status qn-status-${req.status}`;
+                    const statusMap = { idle: 'Ready', saving: 'Saving...', saved: 'Saved!', error: 'Error!' };
+                    statusSpan.textContent = statusMap[req.status];
+                    saveButton.disabled = (req.status === 'saving');
+                    if(req.status === 'error' && req.payload) statusSpan.title = req.payload.message;
+                    if(req.status === 'saved') setTimeout(() => {
+                        if (statusSpan.textContent === 'Saved!') statusSpan.textContent = 'Ready';
+                    }, 2000);
                 }
-                break;
-            case "updateStatus":
-                const noteToUpdate = allNotes.get(request.noteId);
-                if (noteToUpdate) {
-                    const { statusSpan, saveButton } = noteToUpdate;
-                    statusSpan.className = `qn-status qn-status-${request.status}`;
-                    switch (request.status) {
-                        case 'idle':
-                            statusSpan.textContent = 'Ready';
-                            statusSpan.title = '';
-                            saveButton.disabled = false;
-                            break;
-                        case 'saving':
-                            statusSpan.textContent = 'Saving...';
-                            saveButton.disabled = true;
-                            break;
-                        case 'saved':
-                            statusSpan.textContent = 'Saved!';
-                            saveButton.disabled = false;
-                            setTimeout(() => {
-                                if (statusSpan.textContent === 'Saved!') {
-                                    statusSpan.textContent = 'Ready';
-                                }
-                            }, 2000);
-                            break;
-                        case 'error':
-                            statusSpan.textContent = 'Error!';
-                            statusSpan.title = request.payload.message;
-                            saveButton.disabled = false;
-                            break;
-                    }
-                }
-                break;
-        }
+            }
+        };
+        actions[request.action]?.(request);
     }
 
-
-    // --- Main Function to Create a Single Note UI ---
+    // --- UI Creation and Event Handling ---
     function createNoteUI(note) {
         if (allNotes.has(note.id)) return;
 
@@ -133,8 +127,9 @@
 
         const container = document.createElement('div');
         container.className = 'qn-container';
+        container.dataset.color = note.color || 'default';
         if (note.isMinimized) container.classList.add('minimized');
-        
+        if (note.isPinned) container.classList.add('pinned');
         container.style.top = `${note.top}px`;
         container.style.left = `${note.left}px`;
         container.style.width = `${note.width}px`;
@@ -154,6 +149,12 @@
         const headerButtons = document.createElement('div');
         headerButtons.className = 'qn-header-buttons';
 
+        const pinButton = document.createElement('button');
+        pinButton.className = 'qn-pin-btn';
+        pinButton.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M4.146.146A.5.5 0 0 1 4.5 0h7a.5.5 0 0 1 .5.5c0 .68-.342 1.174-.646 1.479-.126.125-.25.224-.354.298v4.431l.078.048c.203.127.476.314.751.555C12.36 7.775 13 8.527 13 9.5a.5.5 0 0 1-.5.5h-4v4.5c0 .276-.224.5-.5.5s-.5-.224-.5-.5V10h-4a.5.5 0 0 1-.5-.5c0-.973.64-1.725 1.17-2.176a6.57 6.57 0 0 1 .75-.56V2.777a.5.5 0 0 1-.354-.298C2.342 2.174 2 1.68 2 .5a.5.5 0 0 1 .5-.5z"/></svg>`;
+        pinButton.title = 'Pin Note';
+        if (note.isPinned) pinButton.classList.add('active');
+        
         const minimizeButton = document.createElement('button');
         minimizeButton.innerHTML = '&#8210;';
         minimizeButton.className = 'qn-minimize-btn';
@@ -178,19 +179,19 @@
         editor.contentEditable = 'true';
         editor.setAttribute('data-placeholder', 'Start writing your note...');
         editor.innerHTML = note.content;
-
-        const toolbar = document.createElement('div');
-        toolbar.className = 'qn-toolbar';
-        toolbar.innerHTML = `
-            <button class="qn-toolbar-btn" data-command="bold" title="Bold"><b>B</b></button>
-            <button class="qn-toolbar-btn" data-command="italic" title="Italic"><i>I</i></button>
-            <button class="qn-toolbar-btn" data-command="underline" title="Underline"><u>U</u></button>
-            <button class="qn-toolbar-btn" data-command="insertUnorderedList" title="Bulleted List"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M5 11.5a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 0 1h-9a.5.5 0 0 1-.5-.5zm0-4a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 0 1h-9a.5.5 0 0 1-.5-.5zm0-4a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 0 1h-9a.5.5 0 0 1-.5-.5zm-3 1a1 1 0 1 0 0-2 1 1 0 0 0 0 2zm0 4a1 1 0 1 0 0-2 1 1 0 0 0 0 2zm0 4a1 1 0 1 0 0-2 1 1 0 0 0 0 2z"/></svg></button>
-            <button class="qn-toolbar-btn" data-command="insertOrderedList" title="Numbered List"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M1.224 11.85H.5v-1h.624a.56.56 0 0 1 .56.56v.38a.56.56 0 0 1-.56.56H.5v-1h.624a.56.56 0 0 1 .56.56v.38a.56.56 0 0 1-.56.56H.5v-1h.724v.216c.196.256.45.42.7.534.25.114.5.17.75.17.65 0 1.155-.33 1.405-.984.25-.654.229-1.422 0-1.924C3.15 9.42 2.5 9 1.65 9c-.45 0-.8.13-1.05.39-.25.26-.35.6-.35 1.05v.216h1.668v-1.14H.5v1.14h.624a.56.56 0 0 1 .56.56v.38a.56.56 0 0 1-.56.56H.5v-1h.624a.56.56 0 0 1 .56.56v.38a.56.56 0 0 1-.56.56zM5 11.5a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 0 1h-9a.5.5 0 0 1-.5-.5zm0-4a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 0 1h-9a.5.5 0 0 1-.5-.5zm0-4a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 0 1h-9a.5.5 0 0 1-.5-.5zM1.65 5.85c.55 0 .95.33 1.15.9.2.55.17 1.2-.05 1.65-.22.45-.6.7-1.1.7-.55 0-.95-.33-1.15-.9-.2-.55-.17-1.2.05-1.65.22-.45.6-.7 1.1-.7z"/></svg></button>
-        `;
+        
+        const toolbar = createToolbar(editor);
 
         const footer = document.createElement('div');
         footer.className = 'qn-footer';
+        if (note.sourceUrl) {
+            const sourceLink = document.createElement('a');
+            sourceLink.href = note.sourceUrl;
+            sourceLink.textContent = new URL(note.sourceUrl).hostname;
+            sourceLink.className = 'qn-source-link';
+            sourceLink.target = '_blank';
+            footer.appendChild(sourceLink);
+        }
 
         const saveButton = document.createElement('button');
         saveButton.className = 'qn-save-btn';
@@ -202,121 +203,173 @@
 
         const resizeHandle = document.createElement('div');
         resizeHandle.className = 'qn-resize-handle';
-
-        header.appendChild(headerTitle);
-        headerButtons.append(minimizeButton, closeButton);
-        header.appendChild(headerButtons);
+        
+        headerButtons.append(pinButton, minimizeButton, closeButton);
+        header.append(headerTitle, headerButtons);
         mainContainer.append(titleInput, toolbar, editor);
-        footer.append(saveButton, statusSpan);
+        footer.append(statusSpan, saveButton);
         container.append(header, mainContainer, footer, resizeHandle);
         shadowRoot.append(styleLink, container);
         document.body.appendChild(host);
 
-        allNotes.set(note.id, { host, container, titleInput, editor, statusSpan, saveButton, minimizeButton, headerTitle });
-
-        const postIfConnected = (message) => {
-            if (port) port.postMessage(message);
+        const uiElements = { 
+            host, container, titleInput, editor, statusSpan, saveButton, 
+            minimizeButton, closeButton, headerTitle, pinButton, header, resizeHandle,
+            colorPicker: toolbar.querySelector('.qn-color-picker')
         };
+        allNotes.set(note.id, uiElements);
+        attachEventListeners(note.id, uiElements);
+    }
+    
+    function createToolbar(editor) {
+        const toolbar = document.createElement('div');
+        toolbar.className = 'qn-toolbar';
 
-        closeButton.onclick = () => postIfConnected({ action: "closeNote", noteId: note.id });
-        minimizeButton.onclick = () => postIfConnected({ action: "toggleMinimize", noteId: note.id });
-        saveButton.onclick = () => postIfConnected({ action: "saveNote", noteId: note.id });
+        const buttons = [
+            { command: 'bold', title: 'Bold', content: '<b>B</b>' },
+            { command: 'italic', title: 'Italic', content: '<i>I</i>' },
+            { command: 'underline', title: 'Underline', content: '<u>U</u>' },
+            { command: 'insertUnorderedList', title: 'Bulleted List', content: '<svg viewBox="0 0 16 16"><path fill-rule="evenodd" d="M5 11.5a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 0 1h-9a.5.5 0 0 1-.5-.5zm0-4a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 0 1h-9a.5.5 0 0 1-.5-.5zm0-4a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 0 1h-9a.5.5 0 0 1-.5-.5zm-3 1a1 1 0 1 0 0-2 1 1 0 0 0 0 2zm0 4a1 1 0 1 0 0-2 1 1 0 0 0 0 2zm0 4a1 1 0 1 0 0-2 1 1 0 0 0 0 2z"/></svg>' },
+            { command: 'insertOrderedList', title: 'Numbered List', content: '<svg viewBox="0 0 16 16"><path fill-rule="evenodd" d="M1.224 11.85H.5v-1h.624a.56.56 0 0 1 .56.56v.38a.56.56 0 0 1-.56.56H.5v-1h.624a.56.56 0 0 1 .56.56v.38a.56.56 0 0 1-.56.56H.5v-1h.724v.216c.196.256.45.42.7.534.25.114.5.17.75.17.65 0 1.155-.33 1.405-.984C3.48 11.43 3.45 10.65 3.2 10.15c-.25-.5-.65-.85-1.1-.85-.45 0-.8.13-1.05.39-.25.26-.35.6-.35 1.05v.216h1.668v-1.14H.5v1.14h.624a.56.56 0 0 1 .56.56v.38a.56.56 0 0 1-.56.56H.5v-1h.624a.56.56 0 0 1 .56.56v.38a.56.56 0 0 1-.56.56zM5 11.5a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 0 1h-9a.5.5 0 0 1-.5-.5zm0-4a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 0 1h-9a.5.5 0 0 1-.5-.5zm0-4a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 0 1h-9a.5.5 0 0 1-.5-.5zM1.65 5.85c.55 0 .95.33 1.15.9.2.55.17 1.2-.05 1.65-.22.45-.6.7-1.1.7-.55 0-.95-.33-1.15-.9C.42 7.65.45 6.9.65 6.4c.22-.45.6-.7 1-.7z"/></svg>' }
+        ];
 
-        let debounceTimer;
-        const debouncedCacheUpdate = () => {
-            clearTimeout(debounceTimer);
-            debounceTimer = setTimeout(() => {
-                headerTitle.textContent = titleInput.value || 'Quick Note';
-                postIfConnected({
-                    action: "updateNoteContent",
-                    noteId: note.id,
-                    data: { title: titleInput.value, content: editor.innerHTML }
-                });
-            }, 500);
-        };
-        
-        // Add a paste event listener to the editor to auto-format links
-        editor.addEventListener('paste', (e) => {
-            // Let the paste happen naturally, then process the result.
-            setTimeout(() => {
-                linkifyNode(editor);
-                debouncedCacheUpdate(); // Trigger a save after linkifying
-            }, 50); 
-        });
-
-        titleInput.addEventListener('input', debouncedCacheUpdate);
-        editor.addEventListener('input', debouncedCacheUpdate);
-
-        toolbar.addEventListener('mousedown', (e) => {
-            const button = e.target.closest('.qn-toolbar-btn');
-            if (button) {
+        buttons.forEach(({ command, title, content }) => {
+            const btn = document.createElement('button');
+            btn.className = 'qn-toolbar-btn';
+            btn.title = title;
+            btn.innerHTML = content;
+            btn.addEventListener('mousedown', (e) => {
                 e.preventDefault();
-                document.execCommand(button.dataset.command, false, null);
-                debouncedCacheUpdate();
-            }
+                document.execCommand(command, false, null);
+            });
+            toolbar.appendChild(btn);
         });
 
-        makeDraggable(container, header, note.id, postIfConnected);
-        makeResizable(container, resizeHandle, note.id, postIfConnected);
+        const checklistBtn = document.createElement('button');
+        checklistBtn.className = 'qn-toolbar-btn';
+        checklistBtn.title = 'Add Checklist Item';
+        checklistBtn.innerHTML = `<svg viewBox="0 0 16 16"><path d="M14 1a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1h12zM2 0a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V2a2 2 0 0 0-2-2H2z"/><path d="M10.97 4.97a.75.75 0 0 1 1.071 1.05l-3.992 4.99a.75.75 0 0 1-1.08.02L4.324 8.384a.75.75 0 1 1 1.06-1.06l2.094 2.093 3.473-4.425a.235.235 0 0 1 .02-.022z"/></svg>`;
+        checklistBtn.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            const item = document.createElement('div');
+            item.className = 'qn-checklist-item';
+            item.setAttribute('data-checked', 'false');
+            item.contentEditable = 'true';
+            item.innerHTML = '&#8203;';
+            editor.focus();
+            document.execCommand('insertHTML', false, item.outerHTML + '<div>&#8203;</div>');
+        });
+        toolbar.appendChild(checklistBtn);
+        
+        const colorPicker = createColorPicker();
+        toolbar.appendChild(colorPicker);
+
+        return toolbar;
     }
 
-    // --- Helper Functions ---
+    function createColorPicker() {
+        const colors = ['default', 'yellow', 'blue', 'green', 'pink'];
+        const pickerContainer = document.createElement('div');
+        pickerContainer.className = 'qn-color-picker';
+        const mainBtn = document.createElement('div');
+        mainBtn.className = 'qn-color-swatch';
+        pickerContainer.appendChild(mainBtn);
+        const dropdown = document.createElement('div');
+        dropdown.className = 'qn-color-dropdown';
+        colors.forEach(color => {
+            const swatch = document.createElement('div');
+            swatch.className = 'qn-color-swatch';
+            swatch.dataset.color = color;
+            dropdown.appendChild(swatch);
+        });
+        pickerContainer.appendChild(dropdown);
+        return pickerContainer;
+    }
 
-    // New function to find and format URLs within a given node.
+    function attachEventListeners(noteId, ui) {
+        const debouncedCacheUpdate = debounce(() => {
+            const newTitle = ui.titleInput.value;
+            const newContent = ui.editor.innerHTML;
+            ui.headerTitle.textContent = newTitle || 'Quick Note';
+            sendMessage({ action: "updateNoteContent", noteId, data: { title: newTitle, content: newContent } });
+        }, 500);
+
+        ui.titleInput.addEventListener('input', debouncedCacheUpdate);
+        ui.editor.addEventListener('input', debouncedCacheUpdate);
+        ui.editor.addEventListener('paste', () => setTimeout(() => {
+            linkifyNode(ui.editor);
+            debouncedCacheUpdate();
+        }, 50));
+
+        ui.host.addEventListener('click', (e) => {
+            if (e.target.classList.contains('qn-checklist-item')) {
+                 const isChecked = e.target.getAttribute('data-checked') === 'true';
+                 e.target.setAttribute('data-checked', !isChecked);
+                 debouncedCacheUpdate();
+            }
+        });
+        
+        ui.pinButton.addEventListener('click', () => sendMessage({ action: 'togglePin', noteId }));
+        ui.minimizeButton.addEventListener('click', () => sendMessage({ action: 'toggleMinimize', noteId }));
+        ui.saveButton.addEventListener('click', () => sendMessage({ action: 'saveNote', noteId }));
+        
+        ui.closeButton.addEventListener('click', () => {
+            ui.host.remove();
+            allNotes.delete(noteId);
+            sendMessage({ action: 'closeNote', noteId });
+        });
+        
+        ui.colorPicker.addEventListener('mousedown', (e) => {
+             const color = e.target.dataset.color;
+             if(color) sendMessage({ action: 'changeNoteColor', noteId, color });
+        });
+
+        makeDraggable(ui.container, ui.header, noteId);
+        makeResizable(ui.container, ui.resizeHandle, noteId);
+    }
+    
+    function debounce(func, delay) {
+        let timeout;
+        return function(...args) {
+            clearTimeout(timeout);
+            timeout = setTimeout(() => func.apply(this, args), delay);
+        };
+    }
+
     function linkifyNode(node) {
         const urlRegex = /https?:\/\/[^\s<>"']+/g;
         const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
         const nodesToProcess = [];
-
-        // First, find all text nodes that contain a URL and are not already in a link.
         let textNode;
         while (textNode = walker.nextNode()) {
             if (textNode.parentNode.tagName !== 'A' && urlRegex.test(textNode.nodeValue)) {
                 nodesToProcess.push(textNode);
             }
         }
-
-        // Process the collected nodes to avoid issues with DOM modification during traversal.
         nodesToProcess.forEach(textNode => {
             const fragment = document.createDocumentFragment();
             let lastIndex = 0;
-
             textNode.nodeValue.replace(urlRegex, (match, offset) => {
-                // Add the text before the found URL.
                 const textBefore = textNode.nodeValue.substring(lastIndex, offset);
-                if (textBefore) {
-                    fragment.appendChild(document.createTextNode(textBefore));
-                }
-
-                // Create the link element.
+                if (textBefore) fragment.appendChild(document.createTextNode(textBefore));
                 const link = document.createElement('a');
                 link.href = match;
                 link.textContent = match;
                 fragment.appendChild(link);
-
                 lastIndex = offset + match.length;
             });
-
-            // Add any remaining text after the last URL.
             const textAfter = textNode.nodeValue.substring(lastIndex);
-            if (textAfter) {
-                fragment.appendChild(document.createTextNode(textAfter));
-            }
-
-            // Replace the original text node with the new fragment containing links.
-            if (fragment.hasChildNodes()) {
-                textNode.parentNode.replaceChild(fragment, textNode);
-            }
+            if (textAfter) fragment.appendChild(document.createTextNode(textAfter));
+            if (fragment.hasChildNodes()) textNode.parentNode.replaceChild(fragment, textNode);
         });
     }
 
-    function makeDraggable(element, dragHandle, noteId, postIfConnected) {
-        dragHandle.onmousedown = (e) => {
+    function makeDraggable(element, handle, noteId) {
+        handle.onmousedown = (e) => {
             if (e.target.closest('button')) return;
             e.preventDefault();
             let pos3 = e.clientX, pos4 = e.clientY;
             document.onmousemove = (e) => {
-                e.preventDefault();
                 let pos1 = pos3 - e.clientX, pos2 = pos4 - e.clientY;
                 pos3 = e.clientX; pos4 = e.clientY;
                 element.style.top = `${element.offsetTop - pos2}px`;
@@ -324,26 +377,25 @@
             };
             document.onmouseup = () => {
                 document.onmouseup = document.onmousemove = null;
-                postIfConnected({ action: "updateNotePosition", noteId, data: { top: element.offsetTop, left: element.offsetLeft } });
+                sendMessage({ action: "updateNotePosition", noteId, data: { top: element.offsetTop, left: element.offsetLeft } });
             };
         };
     }
 
-    function makeResizable(element, handle, noteId, postIfConnected) {
+    function makeResizable(element, handle, noteId) {
         handle.onmousedown = (e) => {
             e.preventDefault(); e.stopPropagation();
-            let initialWidth = element.offsetWidth, initialHeight = element.offsetHeight;
+            let initialW = element.offsetWidth, initialH = element.offsetHeight;
             let initialX = e.clientX, initialY = e.clientY;
-            const minWidth = 300, minHeight = 250;
             document.onmousemove = (e) => {
-                const newWidth = initialWidth + (e.clientX - initialX);
-                const newHeight = initialHeight + (e.clientY - initialY);
-                element.style.width = `${Math.max(minWidth, newWidth)}px`;
-                element.style.height = `${Math.max(minHeight, newHeight)}px`;
+                const newW = initialW + (e.clientX - initialX);
+                const newH = initialH + (e.clientY - initialY);
+                element.style.width = `${Math.max(300, newW)}px`;
+                element.style.height = `${Math.max(250, newH)}px`;
             };
             document.onmouseup = () => {
                 document.onmouseup = document.onmousemove = null;
-                postIfConnected({ action: "updateNotePosition", noteId, data: { width: element.offsetWidth, height: element.offsetHeight } });
+                sendMessage({ action: "updateNotePosition", noteId, data: { width: element.offsetWidth, height: element.offsetHeight } });
             };
         };
     }

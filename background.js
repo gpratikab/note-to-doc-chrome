@@ -16,15 +16,12 @@ async function saveState() {
 }
 
 // --- Main Execution Flow ---
-// 1. Initialize state from storage.
-// 2. Then set up listeners.
 initializeState().then(setupListeners);
 
 
 // --- Function Definitions ---
 
 async function initializeState() {
-    // FIX: Load existing notes from storage on startup to ensure they persist.
     const { notes } = await chrome.storage.local.get('notes');
     if (notes && typeof notes === 'object') {
         NOTES = notes;
@@ -37,12 +34,13 @@ async function initializeState() {
 
 function setupListeners() {
   chrome.runtime.onConnect.addListener(onConnect);
-  chrome.action.onClicked.addListener(onActionClicked);
+  chrome.action.onClicked.addListener(createNewNote); // Use a named function
   chrome.runtime.onMessage.addListener(onMessage);
   chrome.alarms.onAlarm.addListener(onAlarm);
   chrome.tabs.onUpdated.addListener(onTabUpdated);
   chrome.tabs.onActivated.addListener(onTabActivated);
   chrome.runtime.onInstalled.addListener(onInstalled);
+  chrome.commands.onCommand.addListener(onCommand); // Listener for keyboard shortcuts
   console.log('Quick Notes: All listeners registered successfully.');
 }
 
@@ -63,9 +61,7 @@ function onConnect(port) {
         handlePortMessage(request, port);
     });
 
-    // FIX: When a tab connects, immediately send it the current notes to display.
     if (Object.keys(NOTES).length > 0) {
-      console.log(`Sending ${Object.keys(NOTES).length} existing notes to tab ${tabId}.`);
       port.postMessage({ action: 'initialNotes', notes: NOTES });
     }
 }
@@ -73,41 +69,42 @@ function onConnect(port) {
 // --- Message Handling ---
 async function handlePortMessage(request, port) {
     const noteId = request.noteId;
+    if (!NOTES[noteId]) return; // Exit if note has been deleted
+
     switch (request.action) {
       case "updateNoteContent":
-        if (NOTES[noteId]) {
-          NOTES[noteId].title = request.data.title;
-          NOTES[noteId].content = request.data.content;
-          NOTES[noteId].isDirty = true;
-          await saveState();
-          broadcastMessage({ action: 'updateNoteContent', noteId: noteId, data: request.data }, port.sender.tab.id);
-        }
+        NOTES[noteId].title = request.data.title;
+        NOTES[noteId].content = request.data.content;
+        NOTES[noteId].isDirty = true;
+        await saveState();
+        broadcastMessage({ action: 'updateNoteContent', noteId: noteId, data: request.data }, port.sender.tab.id);
         break;
       case "updateNotePosition":
-        if (NOTES[noteId]) {
-          NOTES[noteId] = { ...NOTES[noteId], ...request.data };
-          await saveState();
-        }
+        NOTES[noteId] = { ...NOTES[noteId], ...request.data };
+        await saveState();
         break;
       case "saveNote":
-        if (NOTES[noteId]) {
-          await saveNoteToDoc(NOTES[noteId], true);
-        }
+        await saveNoteToDoc(NOTES[noteId], true);
         break;
       case "toggleMinimize":
-        if (NOTES[noteId]) {
-          const note = NOTES[noteId];
-          note.isMinimized = !note.isMinimized;
-          await saveState();
-          broadcastMessage({ action: 'updateNoteMinimizedState', noteId: noteId, isMinimized: note.isMinimized });
-        }
+        NOTES[noteId].isMinimized = !NOTES[noteId].isMinimized;
+        await saveState();
+        broadcastMessage({ action: 'updateNoteMinimizedState', noteId: noteId, isMinimized: NOTES[noteId].isMinimized });
         break;
+      case "togglePin":
+        NOTES[noteId].isPinned = !NOTES[noteId].isPinned;
+        await saveState();
+        broadcastMessage({ action: 'updatePinState', noteId: noteId, isPinned: NOTES[noteId].isPinned });
+        break;
+      case "changeNoteColor":
+         NOTES[noteId].color = request.color;
+         await saveState();
+         broadcastMessage({ action: 'updateNoteColor', noteId: noteId, color: request.color });
+         break;
       case "closeNote":
-        if (NOTES[noteId]) {
-          delete NOTES[noteId];
-          await saveState();
-          broadcastMessage({ action: 'removeNote', noteId: noteId });
-        }
+        delete NOTES[noteId];
+        await saveState();
+        broadcastMessage({ action: 'removeNote', noteId: noteId });
         break;
     }
 }
@@ -121,7 +118,7 @@ function onMessage(request, sender, sendResponse) {
 
 
 // --- Event Handlers ---
-async function onActionClicked(tab) {
+async function createNewNote(tab) {
   if (!tab.url || !tab.url.startsWith('http')) return;
   await ensureScriptInjected(tab.id);
 
@@ -136,6 +133,9 @@ async function onActionClicked(tab) {
     height: 400,
     isDirty: false,
     isMinimized: false,
+    isPinned: false,
+    color: 'default', // Default color theme
+    sourceUrl: tab.url, // Capture source URL
     namedRangeId: null
   };
   NOTES[noteId] = newNote;
@@ -144,6 +144,11 @@ async function onActionClicked(tab) {
   await saveState();
 }
 
+async function onCommand(command, tab) {
+    if (command === 'create-new-note') {
+        createNewNote(tab);
+    }
+}
 
 async function onAlarm(alarm) {
   if (alarm.name === 'auto-save-all-notes') {
@@ -158,7 +163,6 @@ async function onAlarm(alarm) {
 }
 
 async function onInstalled(details) {
-    // On first install, clear storage and open the options page.
     if (details.reason === 'install') {
         console.log("Quick Notes: First-time installation. Setting up.");
         await chrome.storage.local.clear();
@@ -171,14 +175,12 @@ async function onInstalled(details) {
 }
 
 function onTabUpdated(tabId, changeInfo, tab) {
-    // When a tab is updated (e.g., reloaded or navigates), ensure the script is there.
     if (changeInfo.status === 'complete' && tab.url && tab.url.startsWith('http')) {
         ensureScriptInjected(tabId);
     }
 }
 
 async function onTabActivated(activeInfo) {
-    // When the user switches to a different tab, ensure the script is there.
     await ensureScriptInjected(activeInfo.tabId);
 }
 
@@ -187,8 +189,7 @@ async function ensureScriptInjected(tabId) {
   try {
     await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
   } catch (e) {
-      // Ignore errors, which are common on system pages (e.g. chrome://)
-      // or if the script is already injected.
+      // Ignore errors.
   }
 }
 
@@ -198,7 +199,6 @@ async function broadcastMessage(message, excludeTabId = null) {
     try {
         port.postMessage(message);
     } catch(e) {
-        console.warn(`Could not post message to disconnected tab ${tabId}. Removing port.`);
         connectedPorts.delete(tabId);
     }
   }
@@ -208,7 +208,7 @@ async function sendStatusUpdate(noteId, status, payload = {}) {
   await broadcastMessage({ action: "updateStatus", noteId, status, payload });
 }
 
-// --- API and Saving Logic (no changes) ---
+// --- API and Saving Logic ---
 async function saveNoteToDoc(note, isManualSave) {
   const logPrefix = `[SAVE NOTE]`;
 
@@ -216,11 +216,17 @@ async function saveNoteToDoc(note, isManualSave) {
     if (NOTES[note.id]) NOTES[note.id].isDirty = true;
     return;
   }
+  
+  let contentToSave = note.content;
+  // Append source URL to the content for saving, if it exists.
+  if (note.sourceUrl) {
+      contentToSave += `<p style="font-size:10px;color:#888;">Source: <a href="${note.sourceUrl}">${note.sourceUrl}</a></p>`;
+  }
 
-  const { id, title, content } = note;
-  const noteStateAtSaveStart = { title, content };
+  const { id, title } = note;
+  const noteStateAtSaveStart = { title, content: contentToSave };
 
-  if (!title.trim() && !content.replace(/<[^>]*>?/gm, '').trim()) {
+  if (!title.trim() && !contentToSave.replace(/<[^>]*>?/gm, '').trim()) {
     return;
   }
 
@@ -234,13 +240,13 @@ async function saveNoteToDoc(note, isManualSave) {
     const token = await getAuthToken(isManualSave);
     const requests = [];
 
-    const { plainText: contentText, requests: contentFormattingRequests } = await parseHtmlViaOffscreen(content);
+    const { plainText: contentText, requests: contentFormattingRequests } = await parseHtmlViaOffscreen(contentToSave);
     
     const now = new Date();
     const formattedDate = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
     const formattedTime = now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
     const titleText = title.trim() || `Note from ${formattedDate}`;
-    const contentLabelText = `Content:\n`;
+    const contentLabelText = `\n`; // Simplified label
 
     if (note.namedRangeId) {
         const docResponse = await fetch(`https://docs.googleapis.com/v1/documents/${docId}?fields=namedRanges`, { headers: { 'Authorization': `Bearer ${token}` } });
@@ -305,12 +311,10 @@ async function saveNoteToDoc(note, isManualSave) {
     const newNamedRangeId = replyData.replies.find(r => r.createNamedRange)?.createNamedRange?.namedRangeId;
 
     if (NOTES[id] && newNamedRangeId) {
-      if (NOTES[id].title === noteStateAtSaveStart.title && NOTES[id].content === noteStateAtSaveStart.content) {
+      if (NOTES[id].title === title && NOTES[id].content === note.content) {
         NOTES[id].isDirty = false;
       }
       NOTES[id].namedRangeId = newNamedRangeId; 
-    } else {
-      console.error(`Failed to update note state. Note in memory or newNamedRangeId was missing.`);
     }
     await sendStatusUpdate(id, "saved");
 
@@ -358,7 +362,7 @@ async function parseHtmlViaOffscreen(html) {
     await setupOffscreenDocument();
     return new Promise((resolve) => {
         const listener = (message) => {
-            if (message.action === 'parseComplete' && message.target !== 'offscreen') {
+            if (message.action === 'parseComplete' && message.target === 'background') {
                 chrome.runtime.onMessage.removeListener(listener);
                 resolve(message.data);
             }

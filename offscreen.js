@@ -1,19 +1,14 @@
 // offscreen.js
 
-// Listen for messages from the background script
 chrome.runtime.onMessage.addListener((request) => {
   if (request.target === 'offscreen' && request.action === 'parseHtml') {
     const result = parseHtmlToGoogleDocs(request.html);
-    // Send the result back to the background script
     chrome.runtime.sendMessage({ action: 'parseComplete', data: result, target: 'background' });
   }
 });
 
-// This function correctly parses HTML from the content-editable div
-// into a flat text string and an array of Google Docs API requests.
 function parseHtmlToGoogleDocs(html) {
-    // Sanitize HTML for more reliable parsing
-    const cleanHtml = html.replace(/&nbsp;/g, ' ').replace(/<div>/g, '<p>').replace(/<\/div>/g, '</p>');
+    const cleanHtml = html.replace(/&nbsp;/g, ' ').replace(/<div><br><\/div>/g, '<p><br></p>');
     const doc = new DOMParser().parseFromString(`<body>${cleanHtml}</body>`, 'text/html');
     let plainText = '';
     const requests = [];
@@ -24,66 +19,71 @@ function parseHtmlToGoogleDocs(html) {
             plainText += node.textContent;
             const endIndex = plainText.length;
             if (Object.keys(styles).length > 0 && startIndex < endIndex) {
-                // The fields property must be a string of comma-separated paths.
-                const fields = Object.keys(styles).join(',');
                 requests.push({
-                    updateTextStyle: { range: { startIndex, endIndex }, textStyle: styles, fields: fields }
+                    updateTextStyle: { range: { startIndex, endIndex }, textStyle: styles, fields: Object.keys(styles).join(',') }
                 });
             }
         } else if (node.nodeType === 1) { // Element Node
             const tagName = node.tagName.toUpperCase();
-
+            
+            // Handle Checklist Items
+            if (tagName === 'DIV' && node.classList.contains('qn-checklist-item')) {
+                const isChecked = node.getAttribute('data-checked') === 'true';
+                const prefix = isChecked ? '[x] ' : '[ ] ';
+                const startIndex = plainText.length;
+                plainText += prefix + node.textContent.trim() + '\n';
+                const endIndex = plainText.length;
+                 // FIX: Correctly structure the textStyle request for setting a font family.
+                 requests.push({
+                    updateTextStyle: {
+                        range: { startIndex, endIndex },
+                        textStyle: {
+                            weightedFontFamily: {
+                                fontFamily: 'Roboto Mono' // Use a monospaced font for alignment
+                            }
+                        },
+                        fields: 'weightedFontFamily'
+                    }
+                });
+                return; // Stop further processing of this node
+            }
+            
             const newStyles = { ...styles };
             if (['B', 'STRONG'].includes(tagName)) newStyles.bold = true;
             if (['I', 'EM'].includes(tagName)) newStyles.italic = true;
             if (['U'].includes(tagName)) newStyles.underline = true;
             
-            // FIX: Add explicit styling for links to be saved in Google Docs.
             if (tagName === 'A' && node.href) {
                 newStyles.link = { url: node.href };
-                // Set a standard blue link color.
-                newStyles.foregroundColor = {
-                    color: { rgbColor: { red: 0.066, green: 0.337, blue: 0.831 } }
-                };
-                // Ensure links are underlined unless explicitly styled otherwise.
-                if (styles.underline !== false) {
-                    newStyles.underline = true;
-                }
+                newStyles.foregroundColor = { color: { rgbColor: { red: 0.066, green: 0.337, blue: 0.831 } } };
+                if (styles.underline !== false) newStyles.underline = true;
             }
             
-            const isParagraph = ['P', 'H1', 'H2', 'H3', 'LI'].includes(tagName);
+            const isBlock = ['P', 'H1', 'H2', 'H3', 'LI', 'DIV'].includes(tagName);
 
-            if (isParagraph) {
-                // Ensure each paragraph starts on a new line.
+            if (isBlock) {
                 if (plainText.length > 0 && !plainText.endsWith('\n')) {
                     plainText += '\n';
                 }
-                const paragraphStartIndex = plainText.length;
-
-                // Process children with the new styles
+                const pStartIndex = plainText.length;
                 node.childNodes.forEach(child => walk(child, newStyles));
+                const pEndIndex = plainText.length;
 
-                const paragraphEndIndex = plainText.length;
-
-                // Apply list formatting if the paragraph is a list item and not empty
-                if (tagName === 'LI' && paragraphStartIndex < paragraphEndIndex) {
-                    const parentTag = node.parentNode.tagName.toUpperCase();
+                if (tagName === 'LI' && pStartIndex < pEndIndex) {
                     requests.push({
                         createParagraphBullets: {
-                            range: { startIndex: paragraphStartIndex, endIndex: paragraphEndIndex },
-                            bulletPreset: parentTag === 'OL' ? 'NUMBERED_DECIMAL_ALPHA_ROMAN' : 'BULLET_DISC_CIRCLE_SQUARE'
+                            range: { startIndex: pStartIndex, endIndex: pEndIndex },
+                            bulletPreset: node.parentNode.tagName.toUpperCase() === 'OL' ? 'NUMBERED_DECIMAL_ALPHA_ROMAN' : 'BULLET_DISC_CIRCLE_SQUARE'
                         }
                     });
                 }
-            } else { // For non-paragraph elements like UL, OL, or inline tags
+            } else {
                 node.childNodes.forEach(child => walk(child, newStyles));
             }
         }
     }
     
     doc.body.childNodes.forEach(node => walk(node));
-    
-    // Google Docs adds its own spacing.
     return { plainText: plainText.trim(), requests };
 }
 

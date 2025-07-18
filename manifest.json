@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Quick Notes to Google Docs",
-  "version": "1.5",
+  "version": "1.6",
   "description": "A floating notepad that persists across tabs to save notes to a designated Google Doc.",
   "permissions": [
     "storage",
@@ -9,7 +9,8 @@
     "alarms",
     "notifications",
     "offscreen",
-    "scripting"
+    "scripting",
+    "contextMenus"
   ],
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAv/UmjZO6WMSVON2+do4d4Y7qlzUHHtLy0BBOO4UZVmF8SCxszjjSlAFzLwIaeRr/TdBhGHkS/peTBxqpKynFcStwoWa4KfKXrtx7YNAc/PBnghqBg/TjtNXm/YjPSW898vpggPfv5fQg1MyMF7JDZrtJHlYt3RBA+ZlFI0bZ1MWALYvgjkwW1MfqANDMuxMZxp2nN4Wbigbxostj+Na2omOZFKuvtJ2FBciiQYmNE7ZWtqhlW4zR0wVfkLiMaFolhfx6YPG3e8tXjJXqxW8C/e25X0TAO1hB1WyESXlp8eKjpTRrC3ldQa9xN6eEn9qwexjLOw4z83nddXKTxQM7iwIDAQAB",
   "host_permissions": [
@@ -17,10 +18,19 @@
     "https://docs.googleapis.com/"
   ],
   "action": {
-    "default_title": "Toggle Quick Note"
+    "default_title": "Create a new Quick Note (Alt+Shift+N)"
   },
   "background": {
     "service_worker": "background.js"
+  },
+  "commands": {
+    "create-new-note": {
+      "suggested_key": {
+        "default": "Alt+Shift+N",
+        "mac": "Alt+Shift+N"
+      },
+      "description": "Create a new quick note"
+    }
   },
   "oauth2": {
     "client_id": "937879102097-n4c1rb0qm8rlovfpsmi62ptbdl1r8v7e.apps.googleusercontent.com",
