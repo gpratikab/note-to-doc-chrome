@@ -1,298 +1,328 @@
 // background.js
 
-// --- Utility Functions ---
-const getStorageData = (key) => new Promise((resolve) => chrome.storage.sync.get(key, resolve));
+// --- Global State & Storage Functions ---
+let NOTES = {};
+let AUTH_TOKEN = null;
+let IS_SAVING = false;
+let OFFSCREEN_DOCUMENT_PATH;
 
-async function getDocId() {
-  const { docId } = await getStorageData('docId');
-  if (docId) {
-    return docId;
+const getStorageData = (key) => new Promise((resolve) => chrome.storage.local.get(key, resolve));
+const setStorageData = (data) => new Promise((resolve) => chrome.storage.local.set(data, resolve));
+const getSyncData = (key) => new Promise((resolve) => chrome.storage.sync.get(key, resolve));
+
+async function saveState() {
+  await setStorageData({ notes: NOTES });
+}
+
+// --- Initialization ---
+initializeState().then(setupListeners);
+
+async function initializeState() {
+  const { notes } = await getStorageData('notes');
+  if (notes && typeof notes === 'object') {
+    NOTES = notes;
+    console.log('Quick Notes: State restored from storage.', NOTES);
+  } else {
+    console.log('Quick Notes: No state found, starting fresh.');
   }
-  console.log("Google Doc ID not found. Opening options page.");
-  chrome.runtime.openOptionsPage();
-  return null;
 }
 
-// --- Global State ---
-let authToken = null;
-let notes = {}; // Store all note objects, keyed by a unique ID.
-let offscreenDocumentPath;
-let isSaving = false; // MODIFIED: Add a lock to prevent concurrent saves.
-
-// --- Core Logic ---
-
-async function ensureScriptInjected(tabId) {
-    try {
-        await chrome.scripting.executeScript({
-            target: { tabId },
-            files: ['content.js'],
-        });
-    } catch (e) { /* Ignore errors on special pages */ }
+function setupListeners() {
+  chrome.action.onClicked.addListener(onActionClicked);
+  chrome.runtime.onMessage.addListener(onMessage);
+  chrome.alarms.onAlarm.addListener(onAlarm);
+  chrome.tabs.onUpdated.addListener(onTabUpdated);
+  chrome.tabs.onActivated.addListener(onTabActivated);
+  chrome.runtime.onInstalled.addListener(onInstalled);
+  console.log('Quick Notes: All listeners registered successfully.');
 }
 
-// --- Event Listeners ---
+// --- Event Handlers ---
+async function onActionClicked(tab) {
+  if (!tab.url || !tab.url.startsWith('http')) return;
+  await ensureScriptInjected(tab.id);
 
-chrome.action.onClicked.addListener(async (tab) => {
-    if (!tab.url || !tab.url.startsWith('http')) {
-        return;
+  const noteId = `note-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+  const newNote = {
+    id: noteId,
+    title: '',
+    content: '',
+    top: 60 + (Object.keys(NOTES).length % 10) * 20,
+    left: 60 + (Object.keys(NOTES).length % 10) * 20,
+    width: 350,
+    height: 400,
+    isDirty: false,
+    namedRangeId: null // This will hold the official ID from Google Docs.
+  };
+  NOTES[noteId] = newNote;
+  
+  chrome.tabs.sendMessage(tab.id, { action: 'createNote', note: newNote }).catch(() => {});
+  await saveState();
+}
+
+function onMessage(request, sender, sendResponse) {
+  if (request.target === 'offscreen') return true;
+    
+  (async () => {
+    switch (request.action) {
+      case "getInitialNotes":
+        sendResponse(NOTES);
+        break;
+      case "updateNoteContent":
+        if (NOTES[request.noteId]) {
+          NOTES[request.noteId].title = request.data.title;
+          NOTES[request.noteId].content = request.data.content;
+          NOTES[request.noteId].isDirty = true;
+          await saveState();
+        }
+        break;
+      case "updateNotePosition":
+        if (NOTES[request.noteId]) {
+          NOTES[request.noteId] = { ...NOTES[request.noteId], ...request.data };
+          await saveState();
+        }
+        break;
+      case "saveNote":
+        if (NOTES[request.noteId]) {
+          await saveNoteToDoc(NOTES[request.noteId], true);
+        }
+        break;
+      case "closeNote":
+        if (NOTES[request.noteId]) {
+          delete NOTES[request.noteId];
+          broadcastMessage({ action: 'removeNote', noteId: request.noteId });
+          await saveState();
+        }
+        break;
     }
+  })();
+  return true;
+}
 
-    const noteId = `note-${Date.now()}`;
-    const newNote = {
-        id: noteId,
-        title: '',
-        content: '',
-        top: 60 + (Object.keys(notes).length % 10) * 20,
-        left: 60 + (Object.keys(notes).length % 10) * 20,
-        width: 350,
-        height: 400,
-        isDirty: false,
-        namedRangeId: null
-    };
-    notes[noteId] = newNote;
+async function onAlarm(alarm) {
+  if (alarm.name === 'auto-save-all-notes') {
+    for (const noteId in NOTES) {
+      if (NOTES[noteId]?.isDirty) {
+        saveNoteToDoc(NOTES[noteId], false);
+      }
+    }
+  }
+}
 
-    await ensureScriptInjected(tab.id);
-    chrome.tabs.sendMessage(tab.id, { action: 'createNote', note: newNote })
-      .catch(err => {});
-});
-
-chrome.runtime.onInstalled.addListener(async () => {
+async function onInstalled(details) {
+    if (details.reason === 'install') {
+        await chrome.storage.local.clear();
+        chrome.alarms.create('auto-save-all-notes', {
+            delayInMinutes: 0.2,
+            periodInMinutes: 0.2
+        });
+    }
     const tabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*"] });
     for (const tab of tabs) {
        await ensureScriptInjected(tab.id);
     }
-});
+}
 
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+function onTabUpdated(tabId, changeInfo, tab) {
     if (changeInfo.status === 'complete' && tab.url && tab.url.startsWith('http')) {
         ensureScriptInjected(tabId);
     }
-});
+}
 
-
-chrome.tabs.onActivated.addListener(async (activeInfo) => {
+async function onTabActivated(activeInfo) {
     await ensureScriptInjected(activeInfo.tabId);
-});
+}
 
-// --- Message Handling ---
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.action === "getInitialNotes") {
-    sendResponse(notes);
-    return true;
-  }
-  if (request.action === "updateNoteContent") {
-    if (notes[request.noteId]) {
-      notes[request.noteId].title = request.data.title;
-      notes[request.noteId].content = request.data.content;
-      notes[request.noteId].isDirty = true;
-    }
-  }
-  if (request.action === "updateNotePosition") {
-     if (notes[request.noteId]) {
-        notes[request.noteId].top = request.data.top;
-        notes[request.noteId].left = request.data.left;
-        notes[request.noteId].width = request.data.width;
-        notes[request.noteId].height = request.data.height;
-     }
-  }
-  if (request.action === "saveNote") {
-     if (notes[request.noteId]) {
-        saveNoteToDoc(notes[request.noteId], true);
-     }
-  }
-  if (request.action === "closeNote") {
-    if (notes[request.noteId]) {
-      delete notes[request.noteId];
-      broadcastMessage({ action: 'removeNote', noteId: request.noteId });
-    }
-  }
-  return true;
-});
-
+// --- Core Logic ---
+async function ensureScriptInjected(tabId) {
+  try {
+    await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
+  } catch (e) { /* Ignore */ }
+}
 
 async function broadcastMessage(message) {
-    const tabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*"] });
-    for (const tab of tabs) {
-        chrome.tabs.sendMessage(tab.id, message).catch(() => {});
-    }
+  const tabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*"] });
+  for (const tab of tabs) {
+    chrome.tabs.sendMessage(tab.id, message).catch(() => {});
+  }
 }
-
-
-// --- API and Saving Logic ---
-
-const tenSecondsInMinutes = 10 / 60;
-chrome.alarms.create('auto-save-all-notes', {
-    delayInMinutes: tenSecondsInMinutes,
-    periodInMinutes: tenSecondsInMinutes
-});
-
-chrome.alarms.onAlarm.addListener((alarm) => {
-    if (alarm.name === 'auto-save-all-notes') {
-        for (const noteId in notes) {
-            const note = notes[noteId];
-            if (note.isDirty) {
-                saveNoteToDoc(note, false);
-            }
-        }
-    }
-});
-
 
 async function sendStatusUpdate(noteId, status, payload = {}) {
-    await broadcastMessage({ action: "updateStatus", noteId, status, payload });
+  await broadcastMessage({ action: "updateStatus", noteId, status, payload });
 }
 
+// --- API and Saving Logic with extensive logging ---
 async function saveNoteToDoc(note, isManualSave) {
-  // MODIFIED: If a save is already in progress, skip this one.
-  if (isSaving) {
-    console.log("A save is already in progress. Queuing this save for the next cycle.");
-    // Mark the note as dirty so the next alarm cycle picks it up.
-    if (notes[note.id]) {
-        notes[note.id].isDirty = true;
-    }
+  const logPrefix = `[DEBUG saveNoteToDoc]`;
+
+  console.log(`${logPrefix} --- Initiating save for note ID: ${note.id} ---`);
+
+  if (IS_SAVING) {
+    console.log(`${logPrefix} Save already in progress. Marking note as dirty and returning.`);
+    if (NOTES[note.id]) NOTES[note.id].isDirty = true;
     return;
   }
-  isSaving = true; // Set the lock
 
-  const { id, title, content, namedRangeId } = note;
+  const { id, title, content } = note;
+  const noteStateAtSaveStart = { title, content };
 
   if (!title.trim() && !content.replace(/<[^>]*>?/gm, '').trim()) {
-    isSaving = false; // Release lock
+    console.log(`${logPrefix} Note is empty. Aborting save.`);
     return;
   }
-  
+
+  IS_SAVING = true;
   await sendStatusUpdate(id, "saving");
+  console.log(`${logPrefix} Locking save function. Current namedRangeId from state: ${note.namedRangeId}`);
 
   try {
-    const docId = await getDocId();
+    const { docId } = await getSyncData('docId');
     if (!docId) throw new Error("Google Doc ID is not configured.");
-    const token = await getAuthToken(isManualSave);
-
-    const docResponse = await fetch(`https://docs.googleapis.com/v1/documents/${docId}?fields=namedRanges,body.content`, { headers: { 'Authorization': `Bearer ${token}` } });
-    if (!docResponse.ok) throw new Error((await docResponse.json()).error?.message);
-    const docData = await docResponse.json();
-
-    const requests = [];
-    const namedRange = namedRangeId ? docData.namedRanges?.[namedRangeId] : null;
-    const existingRange = (namedRange && namedRange.ranges && namedRange.ranges.length > 0) ? namedRange.ranges[0] : null;
-
-    const now = new Date();
-    const dateOptions = { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' };
-    const timeOptions = { hour: 'numeric', minute: '2-digit', second: '2-digit' };
-    const formattedDate = now.toLocaleDateString('en-US', dateOptions);
-    const formattedTime = now.toLocaleTimeString('en-US', timeOptions);
     
-    const titleText = title.trim() || `Note from ${formattedDate}`;
+    console.log(`${logPrefix} Got Doc ID: ${docId}`);
+    
+    const token = await getAuthToken(isManualSave);
+    const requests = [];
+    let createNamedRangeIndex = -1;
+
+    console.log(`${logPrefix} Parsing HTML content via offscreen document.`);
     const { plainText: contentText, requests: contentFormattingRequests } = await parseHtmlViaOffscreen(content);
     
-    if (existingRange) {
-        // --- UPDATE PATH ---
+    const now = new Date();
+    const formattedDate = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+    const formattedTime = now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    const titleText = title.trim() || `Note from ${formattedDate}`;
+    const contentLabelText = `Content : \n`;
+
+    if (note.namedRangeId) {
+        console.log(`${logPrefix} Entering UPDATE path because namedRangeId exists.`);
+        const docResponse = await fetch(`https://docs.googleapis.com/v1/documents/${docId}?fields=namedRanges`, { headers: { 'Authorization': `Bearer ${token}` } });
+        if (!docResponse.ok) throw new Error(`Failed to fetch doc data: ${(await docResponse.json()).error.message}`);
+        
+        const docData = await docResponse.json();
+        console.log(`${logPrefix} Fetched document named ranges:`, docData.namedRanges);
+        
+        const namedRange = docData.namedRanges?.[note.id].namedRanges[0];
+        
+        console.log(`${logPrefix} Pratik Debug`,docData.namedRanges, note.namedRangeId, docData.namedRanges?.[note.id].namedRanges[0]);
+        if (!namedRange?.ranges?.length) {
+            console.warn(`${logPrefix} Named range ID '${note.namedRangeId}' not found in fetched data. This can be due to API lag. Aborting save; will retry on next cycle.`);
+            IS_SAVING = false;
+            await sendStatusUpdate(id, "idle");
+            return;
+        }
+        
+        console.log(`${logPrefix} Successfully found named range. Proceeding with update.`);
+        const existingRange = namedRange.ranges[0];
         const timestampText = `Updated: ${formattedDate} at ${formattedTime}\n`;
-        const contentLabelText = `Content : \n`;
         const fullTextToInsert = `${titleText}\n${timestampText}${contentLabelText}${contentText}\n\n`;
         
         requests.push({ deleteContentRange: { range: existingRange } });
         requests.push({ insertText: { location: { index: existingRange.startIndex }, text: fullTextToInsert } });
-
-        let currentIndex = existingRange.startIndex;
-        requests.push({ updateParagraphStyle: { range: { startIndex: currentIndex, endIndex: currentIndex + titleText.length }, paragraphStyle: { namedStyleType: 'HEADING_1' }, fields: 'namedStyleType' } });
-        currentIndex += titleText.length + 1;
-        requests.push({ updateTextStyle: { range: { startIndex: currentIndex, endIndex: currentIndex + 9 }, textStyle: { bold: true }, fields: 'bold' } });
-        currentIndex += timestampText.length;
-        requests.push({ updateTextStyle: { range: { startIndex: currentIndex, endIndex: currentIndex + 10 }, textStyle: { bold: true }, fields: 'bold' } });
-        currentIndex += contentLabelText.length;
         
+        let titleEndIndex = existingRange.startIndex + titleText.length;
+        requests.push({ updateParagraphStyle: { range: { startIndex: existingRange.startIndex, endIndex: titleEndIndex }, paragraphStyle: { namedStyleType: 'HEADING_1' }, fields: 'namedStyleType' } });
+        
+        let contentStartIndex = titleEndIndex + 1 + timestampText.length + contentLabelText.length;
         contentFormattingRequests.forEach(req => {
             const reqKey = Object.keys(req)[0];
-            req[reqKey].range.startIndex += currentIndex;
-            req[reqKey].range.endIndex += currentIndex;
+            req[reqKey].range.startIndex += contentStartIndex;
+            req[reqKey].range.endIndex += contentStartIndex;
             requests.push(req);
         });
 
         requests.push({ createNamedRange: { name: id, range: { startIndex: existingRange.startIndex, endIndex: existingRange.startIndex + fullTextToInsert.length } } });
+        createNamedRangeIndex = requests.length - 1;
 
     } else {
-        // --- CREATE PATH ---
-        const insertionIndex = docData.body?.content?.[docData.body.content.length - 1]?.endIndex - 1 || 1;
-        const timestampText = `Created: ${formattedDate} at ${formattedTime}\n`;
-        const contentLabelText = `Content : \n`;
-        const fullTextToInsert = `${titleText}\n${timestampText}${contentLabelText}${contentText}\n\n`;
+        console.log(`${logPrefix} Entering CREATE path because namedRangeId is missing.`);
+        const docResponse = await fetch(`https://docs.googleapis.com/v1/documents/${docId}?fields=body.content`, { headers: { 'Authorization': `Bearer ${token}` } });
+        if (!docResponse.ok) throw new Error(`Failed to fetch doc body: ${(await docResponse.json()).error.message}`);
+        const docData = await docResponse.json();
 
+        const timestampText = `Created: ${formattedDate} at ${formattedTime}\n`;
+        const fullTextToInsert = `${titleText}\n${timestampText}${contentLabelText}${contentText}\n\n`;
+        const insertionIndex = docData.body.content[docData.body.content.length - 1].endIndex - 1;
+        
         requests.push({ insertText: { location: { index: insertionIndex }, text: fullTextToInsert } });
         
-        let currentIndex = insertionIndex;
-        requests.push({ updateParagraphStyle: { range: { startIndex: currentIndex, endIndex: currentIndex + titleText.length }, paragraphStyle: { namedStyleType: 'HEADING_1' }, fields: 'namedStyleType' } });
-        currentIndex += titleText.length + 1;
-        requests.push({ updateTextStyle: { range: { startIndex: currentIndex, endIndex: currentIndex + 9 }, textStyle: { bold: true }, fields: 'bold' } });
-        currentIndex += timestampText.length;
-        requests.push({ updateTextStyle: { range: { startIndex: currentIndex, endIndex: currentIndex + 10 }, textStyle: { bold: true }, fields: 'bold' } });
-        currentIndex += contentLabelText.length;
+        let titleEndIndex = insertionIndex + titleText.length;
+        requests.push({ updateParagraphStyle: { range: { startIndex: insertionIndex, endIndex: titleEndIndex }, paragraphStyle: { namedStyleType: 'HEADING_1' }, fields: 'namedStyleType' } });
         
+        let contentStartIndex = titleEndIndex + 1 + timestampText.length + contentLabelText.length;
         contentFormattingRequests.forEach(req => {
             const reqKey = Object.keys(req)[0];
-            req[reqKey].range.startIndex += currentIndex;
-            req[reqKey].range.endIndex += currentIndex;
+            req[reqKey].range.startIndex += contentStartIndex;
+            req[reqKey].range.endIndex += contentStartIndex;
             requests.push(req);
         });
-        
+
         requests.push({ createNamedRange: { name: id, range: { startIndex: insertionIndex, endIndex: insertionIndex + fullTextToInsert.length } } });
+        createNamedRangeIndex = requests.length - 1;
     }
     
-    const updateResponse = await fetch(`https://docs.googleapis.com/v1/documents/${docId}:batchUpdate`, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ requests })
-    });
+    console.log(`${logPrefix} Sending batchUpdate request to Google Docs API with ${requests.length} requests.`);
+    // console.log(`${logPrefix} Request body:`, JSON.stringify({ requests }, null, 2));
 
-    if (!updateResponse.ok) throw new Error((await updateResponse.json()).error?.message);
+    const updateResponse = await fetch(`https://docs.googleapis.com/v1/documents/${docId}:batchUpdate`, { method: 'POST', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ requests }) });
+    if (!updateResponse.ok) throw new Error(`batchUpdate failed: ${(await updateResponse.json()).error.message}`);
 
-    console.log(`Note ${id} successfully saved.`);
-    if (notes[id]) {
-      notes[id].isDirty = false;
-      notes[id].namedRangeId = id;
+    const replyData = await updateResponse.json();
+    console.log(`${logPrefix} Received batchUpdate reply:`, replyData);
+
+    const newNamedRangeId = replyData.replies[createNamedRangeIndex]?.createNamedRange?.namedRangeId;
+    console.log(`${logPrefix} Extracted new namedRangeId: ${newNamedRangeId}`);
+
+    if (NOTES[id] && newNamedRangeId) {
+      if (NOTES[id].title === noteStateAtSaveStart.title && NOTES[id].content === noteStateAtSaveStart.content) {
+        NOTES[id].isDirty = false;
+      }
+      NOTES[id].namedRangeId = newNamedRangeId; 
+      console.log(`${logPrefix} Successfully updated note state in memory with new namedRangeId.`);
+    } else {
+      console.error(`${logPrefix} Failed to update note state in memory. Note object or newNamedRangeId was missing.`);
     }
     await sendStatusUpdate(id, "saved");
 
   } catch (error) {
-    console.error(`Error saving note ${id}:`, error.message);
+    console.error(`${logPrefix} --- ERROR DURING SAVE ---`);
+    console.error(error);
     await sendStatusUpdate(id, "error", { message: error.message });
     if (error.message.includes("token")) {
-      chrome.identity.removeCachedAuthToken({ token: authToken }, () => { authToken = null; });
+      chrome.identity.removeCachedAuthToken({ token: AUTH_TOKEN }, () => { AUTH_TOKEN = null; });
     }
   } finally {
-    isSaving = false; // MODIFIED: Release the lock in a finally block.
+    console.log(`${logPrefix} Entering finally block. Releasing save lock and saving state.`);
+    await saveState();
+    IS_SAVING = false;
+    console.log(`${logPrefix} --- Save process finished for note ID: ${note.id} ---`);
   }
 }
 
-// --- Offscreen and Auth Functions ---
+// --- Auth and Offscreen Functions ---
 function getAuthToken(interactive) {
   return new Promise((resolve, reject) => {
     chrome.identity.getAuthToken({ interactive }, (token) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-      } else {
-        authToken = token;
-        resolve(token);
-      }
+      if (chrome.runtime.lastError) return reject(chrome.runtime.lastError);
+      AUTH_TOKEN = token;
+      resolve(token);
     });
   });
 }
-async function hasOffscreenDocument() {
-    offscreenDocumentPath = offscreenDocumentPath || chrome.runtime.getURL('offscreen.html');
+
+async function setupOffscreenDocument() {
+    OFFSCREEN_DOCUMENT_PATH = OFFSCREEN_DOCUMENT_PATH || chrome.runtime.getURL('offscreen.html');
     const clients = await self.clients.matchAll();
-    return clients.some(client => client.url.startsWith(offscreenDocumentPath));
-}
-async function setupOffscreenDocument(path) {
-    if (await hasOffscreenDocument()) return;
+    if (clients.some(client => client.url === OFFSCREEN_DOCUMENT_PATH)) return;
     await chrome.offscreen.createDocument({
-        url: path,
+        url: OFFSCREEN_DOCUMENT_PATH,
         reasons: ['DOM_PARSER'],
         justification: 'The DOMParser API is not available in service workers.',
     });
 }
+
 async function parseHtmlViaOffscreen(html) {
-    offscreenDocumentPath = offscreenDocumentPath || chrome.runtime.getURL('offscreen.html');
-    await setupOffscreenDocument(offscreenDocumentPath);
+    await setupOffscreenDocument();
     return new Promise((resolve) => {
         const listener = (message) => {
             if (message.action === 'parseComplete') {
