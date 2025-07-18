@@ -154,16 +154,21 @@
   background: linear-gradient(135deg, transparent 0%, transparent 60%, rgba(255,255,255,0.2) 60%, rgba(255,255,255,0.2) 80%, transparent 80%, transparent 100%);
 }
 
-.qn-color-picker { position: relative; }
+.qn-color-picker { 
+    position: relative; 
+    /* Add padding to create a hoverable bridge to the dropdown */
+    padding-bottom: 12px;
+    margin-bottom: -12px;
+}
+
 .qn-color-picker .qn-color-swatch {
     width: 22px; height: 22px; border-radius: 50%;
     border: 2px solid var(--color-border); cursor: pointer;
 }
 .qn-color-picker > .qn-color-swatch {
-    background-color: var(--color-background-solid); /* Show current note color */
+    background-color: var(--color-background-solid);
 }
 .qn-color-dropdown {
-    display: none;
     position: absolute;
     bottom: 100%;
     left: 50%;
@@ -174,7 +179,6 @@
     box-shadow: 0 5px 15px rgba(0,0,0,0.3);
     display: flex;
     gap: 5px;
-    margin-bottom: 8px;
     opacity: 0;
     pointer-events: none;
     transition: opacity 0.2s;
