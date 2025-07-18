@@ -7,25 +7,134 @@
     }
     window.quickNoteScriptInjected = true;
 
+    let port;
+
+    function setupConnection() {
+        port = chrome.runtime.connect({ name: 'quick-note-port' });
+
+        // Listen for messages from the background script
+        port.onMessage.addListener(handleMessage);
+
+        // Handle disconnection (e.g., when the extension is reloaded)
+        port.onDisconnect.addListener(() => {
+            console.warn("Quick Notes: Connection to background script lost.");
+            // Grey out the UI to indicate it's disconnected
+            document.querySelectorAll('div[id^="note-"]').forEach(host => {
+                const shadow = host.shadowRoot;
+                if (shadow) {
+                    const container = shadow.querySelector('.qn-container');
+                    if (container) container.style.opacity = '0.5';
+                    const status = shadow.querySelector('.qn-status');
+                    if (status) {
+                        status.textContent = 'Error: Refresh page';
+                        status.className = 'qn-status qn-status-error';
+                    }
+                     // Disable all buttons
+                    shadow.querySelectorAll('button').forEach(btn => btn.disabled = true);
+                }
+            });
+            port = null; // Clear the port
+        });
+    }
+
+    // Establish the initial connection
+    setupConnection();
+
     // --- Global container for all note UIs on this page ---
     const allNotes = new Map();
 
+    // --- Message Handler ---
+    function handleMessage(request) {
+        // If the port is null, it means we are disconnected.
+        if (!port) return;
+
+        switch (request.action) {
+            case "initialNotes":
+                if (request.notes) {
+                    Object.values(request.notes).forEach(createNoteUI);
+                }
+                break;
+            case "createNote":
+                createNoteUI(request.note);
+                break;
+            case "removeNote":
+                const noteToRemove = allNotes.get(request.noteId);
+                if (noteToRemove) {
+                    noteToRemove.host.remove();
+                    allNotes.delete(request.noteId);
+                }
+                break;
+            case "updateNoteMinimizedState":
+                const noteToMinimize = allNotes.get(request.noteId);
+                if (noteToMinimize) {
+                    noteToMinimize.container.classList.toggle('minimized', request.isMinimized);
+                }
+                break;
+            case "updateNoteContent":
+                const noteToUpdateContent = allNotes.get(request.noteId);
+                if (noteToUpdateContent) {
+                    noteToUpdateContent.headerTitle.textContent = request.data.title || 'Quick Note';
+                    if(document.activeElement !== noteToUpdateContent.titleInput) {
+                        noteToUpdateContent.titleInput.value = request.data.title;
+                    }
+                    if(document.activeElement !== noteToUpdateContent.editor) {
+                        noteToUpdateContent.editor.innerHTML = request.data.content;
+                    }
+                }
+                break;
+            case "updateStatus":
+                const noteToUpdate = allNotes.get(request.noteId);
+                if (noteToUpdate) {
+                    const { statusSpan, saveButton } = noteToUpdate;
+                    statusSpan.className = `qn-status qn-status-${request.status}`;
+                    switch (request.status) {
+                        case 'idle':
+                            statusSpan.textContent = 'Ready';
+                            statusSpan.title = '';
+                            saveButton.disabled = false;
+                            break;
+                        case 'saving':
+                            statusSpan.textContent = 'Saving...';
+                            saveButton.disabled = true;
+                            break;
+                        case 'saved':
+                            statusSpan.textContent = 'Saved!';
+                            saveButton.disabled = false;
+                            setTimeout(() => {
+                                if (statusSpan.textContent === 'Saved!') {
+                                    statusSpan.textContent = 'Ready';
+                                }
+                            }, 2000);
+                            break;
+                        case 'error':
+                            statusSpan.textContent = 'Error!';
+                            statusSpan.title = request.payload.message;
+                            saveButton.disabled = false;
+                            break;
+                    }
+                }
+                break;
+        }
+    }
+
+
     // --- Main Function to Create a Single Note UI ---
     function createNoteUI(note) {
-        // If this note UI already exists, don't recreate it.
-        if (allNotes.has(note.id)) {
-            return;
-        }
+        if (allNotes.has(note.id)) return;
 
         const host = document.createElement('div');
-        host.id = note.id; // The host element now gets the unique ID
+        host.id = note.id;
         const shadowRoot = host.attachShadow({ mode: 'open' });
 
         const container = document.createElement('div');
         container.className = 'qn-container';
+        if (note.isMinimized) container.classList.add('minimized');
+        
         container.style.top = `${note.top}px`;
         container.style.left = `${note.left}px`;
         container.style.width = `${note.width}px`;
+        // FIX: Always set the container height from the note object.
+        // The '.minimized' class in CSS will use `!important` to override this when needed.
         container.style.height = `${note.height}px`;
 
         const styleLink = document.createElement('link');
@@ -34,7 +143,18 @@
 
         const header = document.createElement('div');
         header.className = 'qn-header';
-        header.textContent = 'Quick Note';
+        
+        const headerTitle = document.createElement('span');
+        headerTitle.className = 'qn-header-title';
+        headerTitle.textContent = note.title || 'Quick Note';
+
+        const headerButtons = document.createElement('div');
+        headerButtons.className = 'qn-header-buttons';
+
+        const minimizeButton = document.createElement('button');
+        minimizeButton.innerHTML = '&#8210;';
+        minimizeButton.className = 'qn-minimize-btn';
+        minimizeButton.title = 'Minimize Note';
 
         const closeButton = document.createElement('button');
         closeButton.innerHTML = '&times;';
@@ -80,32 +200,31 @@
         const resizeHandle = document.createElement('div');
         resizeHandle.className = 'qn-resize-handle';
 
-        header.appendChild(closeButton);
+        header.appendChild(headerTitle);
+        headerButtons.append(minimizeButton, closeButton);
+        header.appendChild(headerButtons);
         mainContainer.append(titleInput, toolbar, editor);
-        footer.append(saveButton, statusSpan, resizeHandle);
-        container.append(header, mainContainer, footer);
+        footer.append(saveButton, statusSpan);
+        container.append(header, mainContainer, footer, resizeHandle);
         shadowRoot.append(styleLink, container);
         document.body.appendChild(host);
 
-        allNotes.set(note.id, { host, container, titleInput, editor, statusSpan, saveButton });
+        allNotes.set(note.id, { host, container, titleInput, editor, statusSpan, saveButton, minimizeButton, headerTitle });
 
-        // --- Attach Event Listeners for this specific note ---
-        closeButton.onclick = () => {
-            chrome.runtime.sendMessage({ action: "closeNote", noteId: note.id });
+        const postIfConnected = (message) => {
+            if (port) port.postMessage(message);
         };
-        
-        saveButton.onclick = () => {
-            chrome.runtime.sendMessage({
-                action: "saveNote",
-                noteId: note.id
-            });
-        };
+
+        closeButton.onclick = () => postIfConnected({ action: "closeNote", noteId: note.id });
+        minimizeButton.onclick = () => postIfConnected({ action: "toggleMinimize", noteId: note.id });
+        saveButton.onclick = () => postIfConnected({ action: "saveNote", noteId: note.id });
 
         let debounceTimer;
         const debouncedCacheUpdate = () => {
             clearTimeout(debounceTimer);
             debounceTimer = setTimeout(() => {
-                chrome.runtime.sendMessage({
+                headerTitle.textContent = titleInput.value || 'Quick Note';
+                postIfConnected({
                     action: "updateNoteContent",
                     noteId: note.id,
                     data: { title: titleInput.value, content: editor.innerHTML }
@@ -120,21 +239,21 @@
             const button = e.target.closest('.qn-toolbar-btn');
             if (button) {
                 e.preventDefault();
-                const command = button.dataset.command;
-                document.execCommand(command, false, null);
+                document.execCommand(button.dataset.command, false, null);
+                debouncedCacheUpdate();
             }
         });
 
-        makeDraggable(container, header, note.id);
-        makeResizable(container, resizeHandle, note.id);
+        makeDraggable(container, header, note.id, postIfConnected);
+        makeResizable(container, resizeHandle, note.id, postIfConnected);
     }
 
     // --- Helper Functions ---
-    function makeDraggable(element, dragHandle, noteId) {
+    function makeDraggable(element, dragHandle, noteId, postIfConnected) {
         dragHandle.onmousedown = (e) => {
+            if (e.target.closest('button')) return;
             e.preventDefault();
             let pos3 = e.clientX, pos4 = e.clientY;
-            
             document.onmousemove = (e) => {
                 e.preventDefault();
                 let pos1 = pos3 - e.clientX, pos2 = pos4 - e.clientY;
@@ -142,94 +261,29 @@
                 element.style.top = `${element.offsetTop - pos2}px`;
                 element.style.left = `${element.offsetLeft - pos1}px`;
             };
-            
             document.onmouseup = () => {
                 document.onmouseup = document.onmousemove = null;
-                chrome.runtime.sendMessage({
-                    action: "updateNotePosition", noteId,
-                    data: {
-                        top: element.offsetTop, left: element.offsetLeft,
-                        width: element.offsetWidth, height: element.offsetHeight
-                    }
-                });
+                postIfConnected({ action: "updateNotePosition", noteId, data: { top: element.offsetTop, left: element.offsetLeft } });
             };
         };
     }
 
-    function makeResizable(element, handle, noteId) {
+    function makeResizable(element, handle, noteId, postIfConnected) {
         handle.onmousedown = (e) => {
             e.preventDefault(); e.stopPropagation();
             let initialWidth = element.offsetWidth, initialHeight = element.offsetHeight;
             let initialX = e.clientX, initialY = e.clientY;
             const minWidth = 300, minHeight = 250;
-
             document.onmousemove = (e) => {
                 const newWidth = initialWidth + (e.clientX - initialX);
                 const newHeight = initialHeight + (e.clientY - initialY);
                 element.style.width = `${Math.max(minWidth, newWidth)}px`;
                 element.style.height = `${Math.max(minHeight, newHeight)}px`;
             };
-
             document.onmouseup = () => {
                 document.onmouseup = document.onmousemove = null;
-                chrome.runtime.sendMessage({
-                    action: "updateNotePosition", noteId,
-                    data: {
-                        top: element.offsetTop, left: element.offsetLeft,
-                        width: element.offsetWidth, height: element.offsetHeight
-                    }
-                });
+                postIfConnected({ action: "updateNotePosition", noteId, data: { width: element.offsetWidth, height: element.offsetHeight } });
             };
         };
     }
-
-    // --- Message Listener for Background Script ---
-    chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-        if (request.action === "createNote") {
-            createNoteUI(request.note);
-        } else if (request.action === "removeNote") {
-            const noteUI = allNotes.get(request.noteId);
-            if (noteUI) {
-                noteUI.host.remove();
-                allNotes.delete(request.noteId);
-            }
-        } else if (request.action === "updateStatus") {
-            const noteUI = allNotes.get(request.noteId);
-            if (noteUI) {
-                const { statusSpan, saveButton } = noteUI;
-                statusSpan.className = `qn-status qn-status-${request.status}`;
-                switch (request.status) {
-                    case 'idle':
-                        statusSpan.textContent = 'Ready';
-                        saveButton.disabled = false;
-                        break;
-                    case 'saving':
-                        statusSpan.textContent = 'Saving...';
-                        saveButton.disabled = true;
-                        break;
-                    case 'saved':
-                        statusSpan.textContent = 'Saved!';
-                        saveButton.disabled = false;
-                        setTimeout(() => statusSpan.textContent = 'Ready', 2000);
-                        break;
-                    case 'error':
-                        statusSpan.textContent = 'Error!';
-                        statusSpan.title = request.payload.message;
-                        saveButton.disabled = false;
-                        break;
-                }
-            }
-        }
-    });
-
-    // --- Initial Load ---
-    chrome.runtime.sendMessage({ action: "getInitialNotes" }, (initialNotes) => {
-        if (chrome.runtime.lastError) { return; }
-        if (initialNotes) {
-            for (const noteId in initialNotes) {
-                createNoteUI(initialNotes[noteId]);
-            }
-        }
-    });
-
 })();

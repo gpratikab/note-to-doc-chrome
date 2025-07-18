@@ -26,6 +26,8 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* Smooth transition for minimize/expand */
+  transition: height 0.2s ease-in-out;
 }
 
 .qn-header {
@@ -40,6 +42,20 @@
   flex-shrink: 0;
 }
 
+.qn-header-title {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding-right: 10px;
+}
+
+.qn-header-buttons {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.qn-minimize-btn,
 .qn-close-btn {
   cursor: pointer;
   background: none;
@@ -53,8 +69,27 @@
   line-height: 1;
 }
 
+.qn-minimize-btn {
+    font-size: 20px;
+}
+
+.qn-minimize-btn:hover,
 .qn-close-btn:hover {
   opacity: 1;
+}
+
+/* Styles for the minimized state */
+.qn-container.minimized {
+    /* FIX: Use !important to override the inline 'height' style set by resizing.
+       The header height is ~45px (padding + line-height + border). */
+    height: 45px !important;
+    min-height: 45px; /* Prevent resizing smaller than the header */
+}
+
+.qn-container.minimized .qn-main,
+.qn-container.minimized .qn-footer,
+.qn-container.minimized .qn-resize-handle {
+    display: none;
 }
 
 .qn-main {
@@ -157,7 +192,7 @@
 .qn-status-saved { color: #3cce83; }
 .qn-status-error { color: #d03d56; }
 
-.qn-save-close-btn {
+.qn-save-btn {
   background-color: #4a90e2;
   color: white;
   border: none;
@@ -170,8 +205,13 @@
   font-family: inherit;
 }
 
-.qn-save-close-btn:hover {
+.qn-save-btn:hover {
   background-color: #357abd;
+}
+
+.qn-save-btn:disabled {
+    background-color: #555;
+    cursor: not-allowed;
 }
 
 .qn-resize-handle {
@@ -184,5 +224,4 @@
   z-index: 10;
   background: linear-gradient(135deg, transparent 0%, transparent 60%, rgba(255,255,255,0.2) 60%, rgba(255,255,255,0.2) 80%, transparent 80%, transparent 100%);
 }
-```
 
